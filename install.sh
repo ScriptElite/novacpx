@@ -479,6 +479,11 @@ log "Roundcube webmail installed on port ${PORT_WEBMAIL}"
 step "Installing NovaCPX Panel"
 mkdir -p "$WEB_ROOT" "$PANEL_DIR"
 
+if [[ ! -d /opt/novacpx-src ]]; then
+  info "Cloning NovaCPX source..."
+  git clone --quiet https://github.com/myronblair/novacpx.git /opt/novacpx-src >> "$LOG" 2>&1
+fi
+
 # Install panel files from GitHub
 if [[ -d /opt/novacpx-src ]]; then
   cp -r /opt/novacpx-src/panel/public/. "$WEB_ROOT/"
