@@ -766,7 +766,7 @@ CRON
 # PHP-FPM pool cleanup + deferred reload (runs every minute as root)
 # Removes orphaned pool configs for deleted Linux users before reloading,
 # preventing php-fpm from failing to start due to missing user references.
-(crontab -l 2>/dev/null | grep -v "novacpx-fpm-reload"; echo '* * * * * for f in /etc/php/*/fpm/pool.d/*.conf; do [[ "$f" == *"www.conf"* ]] && continue; u=$(basename "$f" .conf); id "$u" &>/dev/null || rm -f "$f"; done; for flag in /tmp/novacpx-fpm-reload-*; do [ -f "$flag" ] && ver=$(basename "$flag" | sed s/novacpx-fpm-reload-//) && rm -f "$flag" && systemctl reload php${ver}-fpm 2>/dev/null; done') | crontab -
+((crontab -l 2>/dev/null || true) | grep -v "novacpx-fpm-reload" || true; echo '* * * * * for f in /etc/php/*/fpm/pool.d/*.conf; do [[ "$f" == *"www.conf"* ]] && continue; u=$(basename "$f" .conf); id "$u" &>/dev/null || rm -f "$f"; done; for flag in /tmp/novacpx-fpm-reload-*; do [ -f "$flag" ] && ver=$(basename "$flag" | sed s/novacpx-fpm-reload-//) && rm -f "$flag" && systemctl reload php${ver}-fpm 2>/dev/null; done') | crontab -
 mkdir -p /var/log/novacpx
 log "Cron jobs installed"
 
