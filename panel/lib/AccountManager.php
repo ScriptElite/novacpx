@@ -47,8 +47,8 @@ class AccountManager {
 
         self::shell("sudo tee " . escapeshellarg("{$docRoot}/index.html") . " > /dev/null << 'HTMLEOF'\n{$html}\nHTMLEOF");
 
-        // Wrap all DB writes in a transaction so partial failures leave no orphans
-        $db->beginTransaction();
+        // NOTE: caller (accounts.php) already owns the outer transaction -- do not
+        // begin/commit/rollback here, PDO doesn't support nested transactions.
         try {
             $acctId = (int)$db->insert(
                 "INSERT INTO accounts (user_id, username, domain, home_dir, package_id, php_version, web_server) VALUES (?,?,?,?,?,?,?)",
@@ -72,9 +72,7 @@ class AccountManager {
             // Create PHP-FPM pool
             PHPManager::createPool($username, $phpVer);
 
-            $db->commit();
         } catch (Throwable $e) {
-            $db->rollBack();
             // Clean up Linux user and PHP-FPM pool so orphaned configs can't crash php-fpm
             self::shell("userdel -r " . escapeshellarg($username) . " 2>/dev/null || true");
             PHPManager::removePool($username);

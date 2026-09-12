@@ -151,7 +151,7 @@ fi
 apt-get update -qq >> "$LOG" 2>&1
 
 PHP_VERSIONS=("7.4" "8.1" "8.2" "8.3")
-PHP_EXTENSIONS="cli fpm common mysql pgsql gd curl mbstring xml zip bcmath intl soap redis imagick opcache"
+PHP_EXTENSIONS="cli fpm common mysql pgsql sqlite3 gd curl mbstring xml zip bcmath intl soap redis imagick opcache"
 
 for VER in "${PHP_VERSIONS[@]}"; do
   info "Installing PHP $VER..."
@@ -169,6 +169,9 @@ log "Default PHP CLI: $PHP_DEFAULT"
 
 # ── Web Server ────────────────────────────────────────────────────────────────
 step "Installing Web Server ($WEB_SERVER)"
+# Forward Authorization header to PHP-FPM -- nginx strips it by default, which
+# silently breaks every Bearer-token API call panel-wide otherwise.
+echo 'fastcgi_param HTTP_AUTHORIZATION $http_authorization;' >> /etc/nginx/fastcgi_params
 
 if [[ "$WEB_SERVER" == "nginx" ]]; then
   apt-get install -y -qq nginx >> "$LOG" 2>&1
@@ -487,8 +490,9 @@ fi
 # Install panel files from GitHub
 if [[ -d /opt/novacpx-src ]]; then
   cp -r /opt/novacpx-src/panel/public/. "$WEB_ROOT/"
-  cp -r /opt/novacpx-src/panel/api "$WEB_ROOT/api"
-  cp -r /opt/novacpx-src/panel/lib "$WEB_ROOT/lib"
+  mkdir -p "$WEB_ROOT/api" "$WEB_ROOT/lib"
+  cp -r /opt/novacpx-src/panel/api/. "$WEB_ROOT/api/"
+  cp -r /opt/novacpx-src/panel/lib/. "$WEB_ROOT/lib/"
   cp -r /opt/novacpx-src/panel/lib /opt/novacpx/lib
   cp /opt/novacpx-src/VERSION "$WEB_ROOT/VERSION" 2>/dev/null || true
 fi
@@ -528,6 +532,7 @@ if [[ -f /opt/novacpx-src/db/schema.sql ]]; then
   sqlite3 "$DB_PATH" "INSERT OR IGNORE INTO settings (key, value) VALUES ('proxy_mode','disabled'),('proxy_apache_port','80');" >> "$LOG" 2>&1
   log "SQLite panel database created and admin user seeded"
 fi
+chown www-data:www-data /var/lib/novacpx
 chown www-data:www-data "$DB_PATH"
 chmod 660 "$DB_PATH"
 
@@ -630,6 +635,7 @@ done
 
 # Create NovaCPX access log writable by www-data
 mkdir -p /var/log/novacpx
+chown www-data:www-data /var/log/novacpx
 touch /var/log/novacpx/access.log
 chown www-data:www-data /var/log/novacpx/access.log
 chmod 664 /var/log/novacpx/access.log
@@ -736,16 +742,16 @@ www-data ALL=(root) NOPASSWD: /bin/ln -sf /etc/nginx/sites-available/* /etc/ngin
 www-data ALL=(root) NOPASSWD: /bin/rm /etc/nginx/sites-available/novacpx-*
 www-data ALL=(root) NOPASSWD: /bin/rm /etc/nginx/sites-enabled/novacpx-*
 # Account management (user creation and home directories)
-www-data ALL=(root) NOPASSWD: /usr/sbin/useradd
-www-data ALL=(root) NOPASSWD: /usr/sbin/userdel
-www-data ALL=(root) NOPASSWD: /usr/sbin/usermod
+www-data ALL=(root) NOPASSWD: /usr/sbin/useradd *
+www-data ALL=(root) NOPASSWD: /usr/sbin/userdel *
+www-data ALL=(root) NOPASSWD: /usr/sbin/usermod *
 www-data ALL=(root) NOPASSWD: /usr/sbin/chpasswd
-www-data ALL=(root) NOPASSWD: /bin/mkdir
-www-data ALL=(root) NOPASSWD: /bin/chown
-www-data ALL=(root) NOPASSWD: /bin/chmod
+www-data ALL=(root) NOPASSWD: /bin/mkdir *
+www-data ALL=(root) NOPASSWD: /bin/chown *
+www-data ALL=(root) NOPASSWD: /bin/chmod *
 # SSL and DKIM
-www-data ALL=(root) NOPASSWD: /usr/bin/certbot
-www-data ALL=(root) NOPASSWD: /usr/bin/opendkim-genkey
+www-data ALL=(root) NOPASSWD: /usr/bin/certbot *
+www-data ALL=(root) NOPASSWD: /usr/bin/opendkim-genkey *
 www-data ALL=(root) NOPASSWD: /usr/sbin/rndc reload
 www-data ALL=(root) NOPASSWD: /usr/sbin/named-checkzone *
 SUDOERS
@@ -789,6 +795,18 @@ NGINXDEFAULT
 fi
 
 # ── Restart services ──────────────────────────────────────────────────────────
+step "Disabling php-fpm systemd sandboxing (panel needs to write /etc, /home)"
+for VER in "${PHP_VERSIONS[@]}"; do
+  mkdir -p /etc/systemd/system/php${VER}-fpm.service.d
+  cat > /etc/systemd/system/php${VER}-fpm.service.d/override.conf <<OVERRIDE
+[Service]
+ProtectSystem=false
+ProtectHome=false
+OVERRIDE
+done
+systemctl daemon-reload >> "$LOG" 2>&1
+log "php-fpm sandboxing overridden"
+
 step "Starting All Services"
 if [[ "$WEB_SERVER" == "nginx" ]]; then
   systemctl restart nginx >> "$LOG" 2>&1
