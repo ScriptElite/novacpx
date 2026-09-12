@@ -805,6 +805,9 @@ ProtectHome=false
 OVERRIDE
 done
 systemctl daemon-reload >> "$LOG" 2>&1
+for VER in "${PHP_VERSIONS[@]}"; do
+  systemctl restart php${VER}-fpm >> "$LOG" 2>&1
+done
 log "php-fpm sandboxing overridden"
 
 step "Starting All Services"
