@@ -44,7 +44,7 @@ for arg in "$@"; do
 done
 
 # ── Banner ─────────────────────────────────────────────────────────────────────
-clear
+clear 2>/dev/null || true
 cat <<'EOF'
 
   ███╗   ██╗ ██████╗ ██╗   ██╗ █████╗  ██████╗██████╗ ██╗  ██╗
@@ -319,9 +319,6 @@ if $INSTALL_MYSQL; then
   apt-get install -y -qq mysql-server >> "$LOG" 2>&1
   systemctl enable mysql >> "$LOG" 2>&1
   systemctl start mysql >> "$LOG" 2>&1
-  mysql -e "CREATE DATABASE IF NOT EXISTS $DB_NAME CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" >> "$LOG" 2>&1
-  mysql -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';" >> "$LOG" 2>&1
-  mysql -e "GRANT ALL PRIVILEGES ON ${DB_NAME}.* TO '${DB_USER}'@'localhost';" >> "$LOG" 2>&1
   # Privileged user for WordPress DB provisioning (CREATE DATABASE + CREATE USER + GRANT)
   mysql -e "CREATE USER IF NOT EXISTS '${DB_WP_USER}'@'localhost' IDENTIFIED BY '${DB_WP_PASS}';" >> "$LOG" 2>&1
   mysql -e "GRANT ALL PRIVILEGES ON \`wp\_%\`.* TO '${DB_WP_USER}'@'localhost';" >> "$LOG" 2>&1
