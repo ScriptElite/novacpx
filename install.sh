@@ -169,13 +169,13 @@ log "Default PHP CLI: $PHP_DEFAULT"
 
 # ── Web Server ────────────────────────────────────────────────────────────────
 step "Installing Web Server ($WEB_SERVER)"
-# Forward Authorization header to PHP-FPM -- nginx strips it by default, which
-# silently breaks every Bearer-token API call panel-wide otherwise.
-echo 'fastcgi_param HTTP_AUTHORIZATION $http_authorization;' >> /etc/nginx/fastcgi_params
 
 if [[ "$WEB_SERVER" == "nginx" ]]; then
   apt-get install -y -qq nginx >> "$LOG" 2>&1
   systemctl enable nginx >> "$LOG" 2>&1
+  # Forward Authorization header to PHP-FPM -- nginx strips it by default, which
+  # silently breaks every Bearer-token API call panel-wide otherwise.
+  echo 'fastcgi_param HTTP_AUTHORIZATION $http_authorization;' >> /etc/nginx/fastcgi_params
   log "nginx installed"
 
   PANEL_WEB_CONF="/etc/nginx/sites-available/novacpx"
