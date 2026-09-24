@@ -1,7 +1,7 @@
 <?php
 /**
- * Server-side branding loader — injected into portal <head> before JS loads.
- * Reads session cookie → looks up user's reseller → returns branding row.
+ * 服务端品牌加载器 — 在 JS 加载前注入门户 <head>。
+ * 读取 session cookie → 查询用户对应的分销商 (reseller) → 返回品牌配置行。
  */
 function novacpx_get_branding(): array {
     static $cache = null;
@@ -50,7 +50,7 @@ function novacpx_branding_head(): void {
     if ($pc) echo "  --primary: $pc;\n  --primary-dark: $pc;\n";
     if ($ac) echo "  --accent: $ac;\n";
     echo '}' . "\n";
-    // Sanitize custom CSS — strip </style> tags
+    // 清理自定义 CSS — 移除 </style> 闭合标签
     echo preg_replace('/<\s*\/\s*style/i', '', $css) . "\n";
     echo '</style>' . "\n";
     if ($b['favicon_url'] ?? '') {
