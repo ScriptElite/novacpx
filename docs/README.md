@@ -1,124 +1,124 @@
-# NovaCPX — Documentation
+# NovaCPX — 说明文档
 
-NovaCPX is a full-featured open-source Linux web hosting control panel. It replaces cPanel/Plesk with a modern three-tier architecture (Admin → Reseller → End User), runs entirely on your own server, and has no per-account licensing fees.
-
----
-
-## Feature Overview
-
-### Hosting Management
-- **Multi-account architecture** — Admin, Reseller, and User tiers with strict isolation
-- **Hosting packages** — disk, email, database, FTP, domain, and subdomain quotas per plan
-- **Per-account PHP version** — PHP 7.4, 8.1, 8.2, 8.3 via PHP-FPM pools; custom php.ini overrides
-- **Wildcard vhost support** — Apache and Nginx backends; per-account vhost files auto-generated
-- **Account suspend / unsuspend** — disables vhost and notifies the account holder
-- **WHMCS billing bridge** — provision, suspend, terminate, and change packages from WHMCS automatically
-
-### Domains & DNS
-- **Addon domains, subdomains, redirects** — unlimited per account (within package limits)
-- **Full DNS manager** — BIND9 or PowerDNS backend; A, AAAA, CNAME, MX, TXT, NS, SRV, CAA records
-- **Nameserver health checker** — verify NS1/NS2 resolve correctly after setup
-- **Auto-provisioning** — DNS zone, vhost, and Linux user created automatically at account creation
-
-### Email
-- **Virtual mailboxes** — Postfix + Dovecot backend; SHA-512 hashed passwords; Maildir storage
-- **IMAP/SMTP access** — IMAP :993 SSL/TLS, SMTP :587 STARTTLS
-- **Webmail (Roundcube)** — built-in at port 8883 with single sign-on (SSO) from user panel
-- **DKIM signing** — auto-provisioned per domain; OpenDKIM wired into Postfix milter
-- **SPF/DMARC records** — added to DNS zone automatically on account creation
-- **Optional Rspamd** — postfix-dovecot-rspamd stack available in Server Options
-- **Domain dropdown** — email creation UI shows selectable domain list (no typos)
-
-### Databases
-- **MySQL / MariaDB** — per-account databases with isolated users; phpMyAdmin link
-- **PostgreSQL** — optional; pgAdmin link when installed
-
-### File Management
-- **In-browser file manager** — browse, create, edit, upload, download, rename, delete, chmod
-- **Path sandboxing** — users cannot access files outside their home directory
-- **FTP accounts** — ProFTPD, vsftpd, or PureFTPD (swappable in Server Options); explicit TLS
-
-### SSL Certificates
-- **Let's Encrypt (Certbot)** — free certificates issued and auto-renewed per domain
-- **Certificate status dashboard** — days remaining, expiry alerts at ≤14 days
-- **Self-signed fallback** — panel runs on a self-signed cert with correct IP SAN by default
-
-### Security
-- **Fail2Ban** — 5 active jails: SSH, panel auth, API abuse, PHP errors, Postfix SMTP
-- **UFW firewall manager** — allow/deny rules by port, protocol, and source IP from admin panel
-- **API rate limiting** — 10 req/min on auth, 120 req/min on API; 429 with Retry-After header
-- **Two-factor authentication (TOTP)** — admin/reseller login; admin can reset any user's 2FA
-- **Session management** — view and revoke active sessions per user
-- **Audit log** — every API action logged with user, IP, payload; filterable by user/action/date
-
-### Docker
-- **Docker Engine management** — install from panel; container/image/volume/network CRUD
-- **Compose stacks** — create from YAML, start/stop/remove, live streaming logs
-- **One-click app catalog** — 9 templates: WordPress, Ghost, Nextcloud, Gitea, Matomo, Vaultwarden, Node.js, Flask, Static Nginx
-- **Per-user quotas** — admin sets max containers, CPU, and RAM per account
-- **Reseller allocation** — resellers configure Docker limits for their own customers
-- **Async launch** — image pulls run in background so PHP never times out
-
-### Server Monitoring
-- **Real-time stats** — CPU, RAM, disk, uptime on admin dashboard (polled via API)
-- **Historical charts** — Chart.js graphs of CPU and RAM over time (5-minute cron samples)
-- **Service health** — Apache/Nginx/MySQL/Postfix/Dovecot/FTP/DNS status with restart controls
-- **JARVIS integration** — optional agent sends live metrics to the JARVIS AI dashboard
-
-### Updates & Versioning
-- **Update channels** — **Stable** (main branch, major/minor releases) or **Beta** (beta branch, patch/pre-release)
-- **One-click update** — `git pull` → PHP syntax check → deploy → auto-restore if panel goes down
-- **Version history** — every deploy recorded with version number, commit hash, and timestamp
-- **Nightly cache** — update checks cached for 12 hours; nightly cron pre-warms cache at 2am
-- **OS upgrades** — `apt-get upgrade` with pre-backup, service health check, and live log streaming
-- **GitHub Actions** — pushes to `main` auto-bump PATCH version; pushes to `beta` auto-append `-beta.N`
-
-### Reseller Features
-- **White-label branding** — custom logo upload (PNG/SVG), accent color picker with live preview, custom CSS, support email/URL, hide "Powered by" toggle
-- **Customer account CRUD** — create, suspend, unsuspend, terminate customer accounts
-- **Docker quota management** — per-customer container/CPU/RAM limits
-- **Strict isolation** — resellers only see their own accounts
-
-### Panel Configuration
-- **Settings page** — panel name, default PHP version, nameservers, update channel; all values loaded from DB, saved individually
-- **Server Options** — swap web/mail/FTP/DNS backends without touching config files
-- **Notifications** — CyberMail API for welcome emails, suspension notices, disk warnings, SSL expiry; test button in panel
-- **Backups** — per-account file + database backup; download or restore; optional rclone/S3 remote destination
-- **Cloudflare integration** — per-account API key; sync DNS records, toggle CDN proxy per record
-- **Nginx Proxy Manager** — Docker-based reverse proxy for additional services
-
-### Developer / Automation
-- **REST API** — 25+ endpoints; all documented in [api-reference.md](api-reference.md)
-- **Bearer token auth** — create API tokens for scripts and integrations
-- **WHMCS module** — full billing bridge for automated provisioning
-- **Auto-deploy webhook** — GitHub push → webhook → git pull + PHP syntax check + DB migrations
-- **SQLite database** — no MySQL required for the panel itself; survives database server restarts
+NovaCPX 是一款功能齐全的开源 Linux Web 托管控制面板。它采用现代的三层架构（管理员 Admin → 代理商 Reseller → 终端用户 End User）来替代 cPanel/Plesk，完全运行在您自己的服务器上，并且没有任何按账号计费的授权费用。
 
 ---
 
-## Panels
+## 功能概览
 
-| Panel | Port | Audience |
+### 托管管理
+- **多账号架构** — 管理员、代理商和用户三级架构，具备严格隔离机制
+- **托管套餐** — 可按套餐限制磁盘、电子邮件、数据库、FTP、域名及子域名配额
+- **单账号独立 PHP 版本** — 支持通过 PHP-FPM 池切换 PHP 7.4、8.1、8.2、8.3；支持自定义 php.ini 配置重写
+- **泛域名虚拟主机支持** — 支持 Apache 与 Nginx 后端；自动生成单账号虚拟主机（vhost）配置文件
+- **账号暂停 / 恢复** — 暂停账号时自动禁用虚拟主机并通知账号拥有者
+- **WHMCS 财务对接** — 可从 WHMCS 自动进行开通、暂停、终止及更改套餐等操作
+
+### 域名与 DNS
+- **附加域、子域名、重定向** — 单账号可添加无限个（受套餐配额限制）
+- **完整 DNS 管理器** — BIND9 或 PowerDNS 后端；支持 A、AAAA、CNAME、MX、TXT、NS、SRV、CAA 解析记录
+- **名称服务器（NS）健康检查器** — 设置完成后可验证 NS1/NS2 是否解析正确
+- **自动开通** — 账号创建时自动生成 DNS 区域、虚拟主机及 Linux 系统用户
+
+### 电子邮件
+- **虚拟邮箱** — 基于 Postfix + Dovecot 后端；SHA-512 哈希密码；Maildir 存储格式
+- **IMAP/SMTP 访问** — IMAP（端口 993 SSL/TLS），SMTP（端口 587 STARTTLS）
+- **网页邮局 (Roundcube)** — 内置于端口 8883，支持从用户面板单点登录（SSO）
+- **DKIM 签名** — 按域名自动开通；OpenDKIM 已挂载至 Postfix milter
+- **SPF/DMARC 记录** — 账号创建时自动添加至 DNS 区域
+- **可选 Rspamd** — 服务器选项中提供 Postfix-Dovecot-Rspamd 邮件服务栈
+- **域名下拉菜单** — 邮件创建界面提供可选域名列表，避免手动输入错误
+
+### 数据库
+- **MySQL / MariaDB** — 单账号数据库及独立用户隔离；提供 phpMyAdmin 直达链接
+- **PostgreSQL** — 可选；安装后提供 pgAdmin 直达链接
+
+### 文件管理
+- **网页版文件管理器** — 浏览、创建、编辑、上传、下载、重命名、删除及修改权限（chmod）
+- **路径沙盒隔离** — 禁止用户访问其家目录（home directory）之外的文件
+- **FTP 账号** — 支持 ProFTPD、vsftpd 或 PureFTPD（可在服务器选项中切换）；支持显式 TLS
+
+### SSL 证书
+- **Let's Encrypt (Certbot)** — 针对每个域名自动签发及续签免费证书
+- **证书状态仪表盘** — 显示剩余天数，剩余 ≤14 天时自动触发过期预警
+- **自签名备用证书** — 默认情况下，面板使用带正确 IP SAN 的自签名证书运行
+
+### 安全防护
+- **Fail2Ban** — 内置 5 个活性封禁规则（Jails）：SSH、面板认证、API 防刷、PHP 错误、Postfix SMTP
+- **UFW 防火墙管理器** — 可在管理员面板中按端口、协议及源 IP 设置允许/拒绝规则
+- **API 速率限制** — 身份验证接口 10 次/分钟，通用 API 120 次/分钟；超限返回 429 及 Retry-After 响应头
+- **双因子验证 (TOTP)** — 支持管理员/代理商登录；管理员可重置任意用户的 2FA
+- **会话管理** — 查看并可单独注销各用户的活跃会话
+- **审计日志** — 记录每次 API 操作（包含用户、IP、请求载荷）；支持按用户/操作/日期筛选
+
+### Docker 容器管理
+- **Docker 引擎管理** — 可直接在面板内安装；支持容器/镜像/数据卷/网络的增删改查（CRUD）
+- **Compose 应用栈** — 基于 YAML 创建、启动/停止/删除，以及实时日志流查看
+- **一键应用目录** — 提供 9 个应用模板：WordPress、Ghost、Nextcloud、Gitea、Matomo、Vaultwarden、Node.js、Flask、静态 Nginx
+- **单用户配额限制** — 管理员可设置每个账号的最大容器数、CPU 及内存配额
+- **代理商配额分配** — 代理商可为其下属客户配置 Docker 资源限制
+- **异步后台拉取** — 镜像拉取在后台运行，防止 PHP 请求超时
+
+### 服务器监控
+- **实时状态** — 管理员仪表盘实时显示 CPU、内存、磁盘及运行时间（通过 API 轮询）
+- **历史图表** — 基于 Chart.js 展示 CPU 与内存随时间变化的趋势图（每 5 分钟由 Cron 采样）
+- **服务健康度** — 展示 Apache/Nginx/MySQL/Postfix/Dovecot/FTP/DNS 的状态并提供重启控制
+- **JARVIS 集成** — 可选 Agent，可将实时指标发送至 JARVIS AI 仪表盘
+
+### 更新与版本控制
+- **更新通道** — **Stable**（主分支 main，包含主/次版本更新）或 **Beta**（测试分支 beta，包含补丁/预发布更新）
+- **一键更新** — 执行 `git pull` → PHP 语法检查 → 部署 → 若面板崩溃则自动还原
+- **版本历史** — 每次部署均记录版本号、Commit Hash 及时间戳
+- **隔夜缓存** — 更新检查结果缓存 12 小时；每晚 2 点通过 Cron 预热缓存
+- **系统升级** — 执行 `apt-get upgrade`，并自动完成预备备份、服务健康检查与日志实时流输出
+- **GitHub Actions** — 提交至 `main` 分支自动增加 PATCH 版本；提交至 `beta` 分支自动追加 `-beta.N`
+
+### 代理商功能
+- **白标自定义品牌** — 支持上传自定义 Logo（PNG/SVG）、自定义主题色（带实时预览）、自定义 CSS、支持邮箱/网址，以及隐藏“Powered by”开关
+- **客户账号管理** — 创建、暂停、恢复、终止客户账号
+- **Docker 配额管理** — 按客户配置容器数、CPU 及内存上限
+- **严格隔离** — 代理商仅能查看与管理属于自己的客户账号
+
+### 面板配置
+- **设置页面** — 配置面板名称、默认 PHP 版本、名称服务器、更新通道；所有值均从数据库加载并支持独立保存
+- **服务器选项** — 无需手动修改配置文件即可无缝切换 Web/邮件/FTP/DNS 后端服务
+- **通知系统** — 调用 CyberMail API 发送欢迎邮件、暂停通知、磁盘预警及 SSL 过期提醒；面板内内置测试按钮
+- **备份管理** — 单账号文件与数据库备份；支持下载或还原；可选 rclone/S3 远程存储位置
+- **Cloudflare 集成** — 单账号 API Key 支持；同步 DNS 解析记录，可按记录开启/关闭 CDN 代理
+- **Nginx Proxy Manager** — 基于 Docker 的反向代理，用于接入额外服务
+
+### 开发者与自动化
+- **REST API** — 包含 25+ 个 API 接口；完整文档见 [api-reference.md](api-reference.md)
+- **Bearer Token 认证** — 创建 API Token 用于脚本编写与第三方集成
+- **WHMCS 模块** — 提供用于自动化开通的完整财务对接 Bridge
+- **自动部署 Webhook** — GitHub Push 触发 → Webhook → Git Pull + PHP 语法检查 + 数据库迁移
+- **SQLite 数据库** — 面板自身无需 MySQL 数据库；即使数据库服务器重启，面板仍可正常运行
+
+---
+
+## 面板入口与端口
+
+| 面板名称 | 端口 | 面向对象 |
 |-------|------|----------|
-| Admin | 8882 | Server administrators |
-| Reseller | 8881 | Reseller accounts |
-| User | 8880 | End-user hosting accounts |
-| Webmail (Roundcube) | 8883 | Email users (SSO from user panel) |
+| 管理员面板 (Admin) | 8882 | 服务器管理员 |
+| 代理商面板 (Reseller) | 8881 | 代理商账号 |
+| 用户面板 (User) | 8880 | 终端托管用户 |
+| 网页邮局 (Roundcube) | 8883 | 邮箱用户（支持从用户面板单点登录） |
 
 ---
 
-## Documentation
+## 说明文档导航
 
-| Guide | Audience |
+| 指南 | 面向对象 |
 |-------|----------|
-| [Installation Guide](install.md) | Server admins — requirements, installer, auto-deploy setup |
-| [Admin Guide](admin-guide.md) | Full admin panel feature reference |
-| [Reseller Guide](reseller-guide.md) | Reseller account and branding management |
-| [User Guide](user-guide.md) | End-user features: files, email, databases, Docker, etc. |
-| [API Reference](api-reference.md) | Full REST API with auth, rate limits, and all endpoints |
+| [安装指南](install.md) | 服务器管理员 — 系统要求、安装程序、自动部署配置 |
+| [管理员指南](admin-guide.md) | 完整的管理员面板功能参考文档 |
+| [代理商指南](reseller-guide.md) | 代理商账号与品牌自定义管理 |
+| [用户指南](user-guide.md) | 终端用户功能：文件、邮件、数据库、Docker 等 |
+| [API 参考文档](api-reference.md) | 完整的 REST API 规范，包含认证、速率限制及所有接口说明 |
 
 ---
 
-## Source
+## 源码
 
-GitHub: [myronblair/novacpx](https://github.com/myronblair/novacpx) (private)
+GitHub: [myronblair/novacpx](https://github.com/myronblair/novacpx)（私有仓库）
