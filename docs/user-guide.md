@@ -1,196 +1,196 @@
-# NovaCPX — User Guide
+# NovaCPX — 用户指南
 
-## Accessing the User Panel
+## 访问用户面板
 
-The user panel runs on port **8880**. Navigate to `https://<server-ip>:8880` and log in with the username and password provided by your hosting provider.
+用户面板运行在端口 **8880** 上。导航到 `https://<服务器IP>:8880`，并使用你的托管服务商提供的用户名和密码登录。
 
-Your browser may warn about the self-signed certificate — accept it to continue.
+你的浏览器可能会对自签名证书发出警告——接受它即可继续。
 
-## Dashboard
+## 仪表盘
 
-The dashboard shows a summary of your account:
+仪表盘显示你的账户摘要：
 
-- Disk usage vs. your plan limit
-- Number of email accounts, databases, domains, and FTP accounts in use
-- Recent activity
+- 磁盘使用量与你的套餐限制的对比
+- 正在使用的电子邮件账户、数据库、域名和 FTP 账户数量
+- 最近活动
 
-## Domains
+## 域名
 
-**Domains** shows all domains and subdomains on your account.
+**Domains** 显示你账户上的所有域名和子域名。
 
-### Adding a domain or subdomain
+### 添加域名或子域名
 
-Click **Add Domain** and choose:
+点击 **Add Domain** 并选择：
 
-- **Addon domain** — a fully separate website hosted on your account
-- **Subdomain** — a subdomain of your main domain (e.g. `blog.example.com`)
-- **Redirect** — forwards visitors to another URL
+- **附加域名** — 托管在你账户上的一个完全独立的网站
+- **子域名** — 你的主域名的子域名（例如 `blog.example.com`）
+- **重定向** — 将访问者转发到另一个 URL
 
-Each domain or subdomain gets its own document root directory.
+每个域名或子域名都有自己的文档根目录。
 
-### Removing a domain
+### 移除域名
 
-You can remove addon domains and subdomains. The primary domain of your account cannot be removed.
+你可以移除附加域名和子域名。你账户的主域名不能被移除。
 
-## File Manager
+## 文件管理器
 
-The file manager lets you browse, create, edit, upload, and delete files in your account's home directory.
+文件管理器让你可以浏览、创建、编辑、上传和删除账户主目录中的文件。
 
-### Navigation
+### 导航
 
-Click any folder to open it. Use the breadcrumb trail at the top to go back up.
+点击任意文件夹即可打开它。使用顶部的面包屑导航返回上一级。
 
-### File operations
+### 文件操作
 
-| Action | How |
-|--------|-----|
-| Edit a file | Click the filename |
-| Create a file | Click **New File** |
-| Create a folder | Click **New Folder** |
-| Upload | Click **Upload** or drag files onto the panel |
-| Download | Select a file → **Download** |
-| Rename | Select a file → **Rename** |
-| Delete | Select a file → **Delete** |
-| Change permissions | Select a file → **chmod** |
+| 操作 | 方法 |
+|------|------|
+| 编辑文件 | 点击文件名 |
+| 创建文件 | 点击 **New File** |
+| 创建文件夹 | 点击 **New Folder** |
+| 上传 | 点击 **Upload** 或将文件拖到面板上 |
+| 下载 | 选择文件 → **Download** |
+| 重命名 | 选择文件 → **Rename** |
+| 删除 | 选择文件 → **Delete** |
+| 更改权限 | 选择文件 → **chmod** |
 
-Files outside your home directory cannot be accessed.
+无法访问你主目录之外的文件。
 
-## Email
+## 电子邮件
 
-**Email** manages mailboxes for your domains.
+**Email** 管理你域名的邮箱。
 
-### Creating a mailbox
+### 创建邮箱
 
-Click **Add Email Account**. Enter the local part (the part before `@`) in the text field, then select your domain from the dropdown. Set a password. An optional storage quota limits how much mail the mailbox can hold.
+点击 **Add Email Account**。在文本字段中输入本地部分（`@` 之前的部分），然后从下拉列表中选择你的域名。设置密码。可选的存储配额限制邮箱可以保存的邮件量。
 
-Only domains on your account appear in the dropdown, preventing typos in the address.
+只有你账户上的域名会出现在下拉列表中，从而防止地址中出现拼写错误。
 
-### Accessing your email
+### 访问你的电子邮件
 
-- **Webmail** — click **Webmail** in the panel sidebar to open Roundcube in a new tab. You are logged in automatically (single sign-on).
-- **Email client (Thunderbird, Outlook, Apple Mail, etc.)** — use these settings:
-  - Incoming (IMAP): `<server-hostname>`, port 993, SSL/TLS
-  - Outgoing (SMTP): `<server-hostname>`, port 587, STARTTLS
-  - Username: your full email address (e.g. `you@example.com`)
-  - Password: the mailbox password you set in the panel
+- **网络邮件** — 点击面板侧边栏中的 **Webmail** 在新标签页中打开 Roundcube。你会自动登录（单点登录）。
+- **电子邮件客户端（Thunderbird、Outlook、Apple Mail 等）** — 使用以下设置：
+  - 接收（IMAP）：`<服务器主机名>`，端口 993，SSL/TLS
+  - 发送（SMTP）：`<服务器主机名>`，端口 587，STARTTLS
+  - 用户名：你的完整电子邮件地址（例如 `you@example.com`）
+  - 密码：你在面板中设置的邮箱密码
 
-### Suspending a mailbox
+### 暂停邮箱
 
-Suspending stops new mail from being delivered but does not delete any messages.
+暂停会阻止新邮件投递，但不会删除任何邮件。
 
-## Databases
+## 数据库
 
-**Databases** manages MySQL databases for your account.
+**Databases** 管理你账户的 MySQL 数据库。
 
-### Creating a database
+### 创建数据库
 
-Click **Create Database**. Enter a database name and password. The username is automatically created to match the database name (prefixed with your account username).
+点击 **Create Database**。输入数据库名称和密码。用户名会自动创建，与数据库名称匹配（以你的账户用户名为前缀）。
 
-Connection details:
+连接信息：
 
-| Field | Value |
-|-------|-------|
-| Host | localhost (from PHP/scripts on the server) |
-| Database | as shown in the panel |
-| Username | as shown in the panel |
-| Password | what you set |
-| Port | 3306 |
+| 字段 | 值 |
+|------|-----|
+| 主机 | localhost（从服务器上的 PHP/脚本访问） |
+| 数据库 | 面板中显示的 |
+| 用户名 | 面板中显示的 |
+| 密码 | 你设置的 |
+| 端口 | 3306 |
 
 ## FTP
 
-**FTP** creates FTP user accounts for uploading files.
+**FTP** 创建用于上传文件的 FTP 用户账户。
 
-### Creating an FTP account
+### 创建 FTP 账户
 
-Click **Add FTP Account**. Set a username, password, and the directory this account can access. The directory must be within your home directory.
+点击 **Add FTP Account**。设置用户名、密码以及此账户可以访问的目录。该目录必须位于你的主目录内。
 
-### Connecting
+### 连接
 
-Use any FTP client (FileZilla, Cyberduck, etc.):
+使用任意 FTP 客户端（FileZilla、Cyberduck 等）：
 
-- Host: `<server-hostname>`
-- Port: 21
-- Username: the FTP username you created
-- Password: the FTP password
-- Protocol: FTP with explicit TLS (FTPES)
+- 主机：`<服务器主机名>`
+- 端口：21
+- 用户名：你创建的 FTP 用户名
+- 密码：FTP 密码
+- 协议：带显式 TLS 的 FTP（FTPES）
 
 ## DNS
 
-**DNS** lets you manage the DNS records for your domains.
+**DNS** 让你管理域名的 DNS 记录。
 
-Common tasks:
+常见任务：
 
-- **Point a domain to a different IP** — edit or add an A record
-- **Set up email (Google Workspace, etc.)** — add or change MX records
-- **Verify domain ownership** — add a TXT record
-- **Set up a CNAME** — point one name to another
+- **将域名指向不同的 IP** — 编辑或添加 A 记录
+- **设置电子邮件（Google Workspace 等）** — 添加或更改 MX 记录
+- **验证域名所有权** — 添加 TXT 记录
+- **设置 CNAME** — 将一个名称指向另一个名称
 
-Changes are applied immediately (BIND9 reloads after each change). DNS propagation to the wider internet takes up to 24-48 hours depending on TTL.
+更改会立即生效（每次更改后 BIND9 会重新加载）。DNS 传播到更广泛的互联网需要长达 24-48 小时，具体取决于 TTL。
 
-## SSL Certificates
+## SSL 证书
 
-**SSL** manages HTTPS certificates for your domains.
+**SSL** 管理你域名的 HTTPS 证书。
 
-Click **Issue Certificate** next to a domain to request a free Let's Encrypt certificate. The domain must be publicly reachable (DNS must resolve to this server's IP) for the certificate to be issued.
+点击域名旁边的 **Issue Certificate** 申请免费的 Let's Encrypt 证书。域名必须可以公开访问（DNS 必须解析到此服务器的 IP），证书才能签发。
 
-Certificates are renewed automatically 30 days before expiry. You will receive an email warning if a certificate is about to expire and has not been renewed.
+证书会在到期前 30 天自动续期。如果证书即将到期且尚未续期，你会收到一封警告电子邮件。
 
-## Cron Jobs
+## Cron 任务
 
-**Cron** schedules recurring tasks on the server.
+**Cron** 在服务器上安排周期性任务。
 
-### Adding a cron job
+### 添加 cron 任务
 
-Click **Add Cron Job**. Enter:
+点击 **Add Cron Job**。输入：
 
-- **Schedule** — standard cron expression (e.g. `0 * * * *` for every hour)
-- **Command** — the shell command or PHP script to run
-- **Enabled** — toggle on/off without deleting
+- **计划** — 标准 cron 表达式（例如 `0 * * * *` 表示每小时）
+- **命令** — 要运行的 shell 命令或 PHP 脚本
+- **启用** — 在不删除的情况下打开/关闭
 
-Common schedules:
+常见的计划：
 
-| Expression | Runs |
-|------------|------|
-| `* * * * *` | Every minute |
-| `0 * * * *` | Every hour |
-| `0 0 * * *` | Daily at midnight |
-| `0 0 * * 0` | Weekly on Sunday |
-| `0 0 1 * *` | Monthly on the 1st |
+| 表达式 | 运行时间 |
+|--------|---------|
+| `* * * * *` | 每分钟 |
+| `0 * * * *` | 每小时 |
+| `0 0 * * *` | 每天午夜 |
+| `0 0 * * 0` | 每周日 |
+| `0 0 1 * *` | 每月 1 日 |
 
 ## PHP
 
-If your account has access to multiple PHP versions, the **PHP** section lets you switch the PHP version used for your account and configure per-account `php.ini` overrides (memory limit, upload size, execution time, etc.).
+如果你的账户可以访问多个 PHP 版本，**PHP** 部分让你切换账户使用的 PHP 版本，并配置按账户的 `php.ini` 覆盖项（内存限制、上传大小、执行时间等）。
 
 ## Docker
 
-If Docker is enabled for your account, **Docker** shows your containers.
+如果为你的账户启用了 Docker，**Docker** 会显示你的容器。
 
-From this page you can:
+在此页面你可以：
 
-- **Start / stop / restart** containers
-- **View logs** from a container
-- **Launch an app** from the one-click catalog:
+- **启动 / 停止 / 重启**容器
+- **查看日志**（来自某个容器）
+- **启动应用**（来自一键目录）：
   - WordPress
   - Ghost
   - Nextcloud
   - Gitea
-  - Matomo (analytics)
-  - Vaultwarden (password manager)
-  - Node.js app
-  - Flask app
-  - Static website (Nginx)
+  - Matomo（分析）
+  - Vaultwarden（密码管理器）
+  - Node.js 应用
+  - Flask 应用
+  - 静态网站（Nginx）
 
-Your Docker quota (max containers, RAM, CPU) is set by your hosting provider.
+你的 Docker 配额（最大容器数、内存、CPU）由你的托管服务商设置。
 
-## Account Settings
+## 账户设置
 
-**Settings** lets you change your own panel password.
+**Settings** 让你更改自己的面板密码。
 
-To change your password:
+要更改密码：
 
-1. Go to **Settings**
-2. Enter your current password
-3. Enter and confirm your new password
-4. Click **Save**
+1. 转到 **Settings**
+2. 输入你的当前密码
+3. 输入并确认你的新密码
+4. 点击 **Save**
 
-Your new password takes effect immediately. If you also use FTP or SSH with this account, those passwords are updated as well.
+你的新密码会立即生效。如果你还使用此账户进行 FTP 或 SSH，那些密码也会一并更新。
