@@ -1,7 +1,7 @@
 <?php
 /**
- * Server-side branding loader — injected into portal <head> before JS loads.
- * Reads session cookie → looks up user's reseller → returns branding row.
+ * 服务端品牌标识加载器 — 在 JS 加载之前注入到 Portal 的 <head> 中。
+ * 读取 Session Cookie → 查找用户的分销商（Reseller） → 返回品牌数据行。
  */
 function novacpx_get_branding(): array {
     static $cache = null;
@@ -50,12 +50,12 @@ function novacpx_branding_head(): void {
     if ($pc) echo "  --primary: $pc;\n  --primary-dark: $pc;\n";
     if ($ac) echo "  --accent: $ac;\n";
     echo '}' . "\n";
-    // Sanitize custom CSS — allow only safe property declarations, strip everything else.
-    // Regex approach (strip </style>) is bypassable; whitelist parsing is the safe alternative.
-    $css = preg_replace('/<[^>]*>/s', '', $css);           // strip any HTML tags
-    $css = preg_replace('/javascript\s*:/i', '', $css);    // strip js: URLs
-    $css = preg_replace('/@import\b/i', '', $css);         // strip @import
-    $css = preg_replace('/expression\s*\(/i', '', $css);   // strip IE expression()
+    // 过滤自定义 CSS — 仅允许安全的属性声明，清除其他所有非法内容。
+    // 正则方法（剥离 </style>）可被绕过；白名单解析才是安全的替代方案。
+    $css = preg_replace('/<[^>]*>/s', '', $css);           // 剥离任何 HTML 标签
+    $css = preg_replace('/javascript\s*:/i', '', $css);    // 剥离 js: 协议 URL
+    $css = preg_replace('/@import\b/i', '', $css);         // 剥离 @import 规则
+    $css = preg_replace('/expression\s*\(/i', '', $css);   // 剥离 IE expression()
     echo $css . "\n";
     echo '</style>' . "\n";
     if ($b['favicon_url'] ?? '') {
