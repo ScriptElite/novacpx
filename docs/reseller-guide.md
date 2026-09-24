@@ -1,107 +1,107 @@
-# NovaCPX — Reseller Guide
+# NovaCPX — 经销商指南
 
-## Accessing the Reseller Panel
+## 访问经销商面板
 
-The reseller panel runs on port **8881**. Navigate to `https://<server-ip>:8881` and log in with your reseller credentials.
+经销商面板运行在端口 **8881** 上。导航到 `https://<服务器IP>:8881`，并使用你的经销商凭据登录。
 
-Your admin will provide your username and initial password.
+你的管理员会提供你的用户名和初始密码。
 
-## Overview
+## 概述
 
-As a reseller you can create and manage hosting accounts for your customers. You only see accounts assigned to you — other resellers' accounts are hidden. The admin can see all accounts.
+作为经销商，你可以为你的客户创建和管理主机账户。你只能看到分配给你的账户——其他经销商的账户是隐藏的。管理员可以看到所有账户。
 
-## Accounts
+## 账户
 
-### Creating a customer account
+### 创建客户账户
 
 **Accounts → Create Account**
 
-| Field | Notes |
-|-------|-------|
-| Username | Lowercase, alphanumeric. Unique on the server. |
-| Domain | Primary domain. DNS zone and web vhost created automatically. |
-| Email | Customer's email. Receives welcome notification (if enabled). |
-| Password | Min 8 characters. |
-| Package | Resource limits. Available packages are defined by your admin. |
-| PHP version | PHP-FPM version for this account. |
+| 字段 | 说明 |
+|------|------|
+| 用户名 | 小写字母和数字。在服务器上唯一。 |
+| 域名 | 主域名。会自动创建 DNS 区域和 Web 虚拟主机。 |
+| 电子邮件 | 客户的电子邮件。用于接收欢迎通知（如果已启用）。 |
+| 密码 | 最少 8 个字符。 |
+| 套餐 | 资源限制。可用套餐由你的管理员定义。 |
+| PHP 版本 | 此账户的 PHP-FPM 版本。 |
 
-### Managing accounts
+### 管理账户
 
-From **Accounts**, you can:
+在 **Accounts** 中，你可以：
 
-- **Suspend** — disables the customer's website
-- **Unsuspend** — re-enables it
-- **Change Password** — reset the customer's panel and system password
+- **暂停** — 禁用客户的网站
+- **恢复** — 重新启用它
+- **更改密码** — 重置客户的面板密码和系统密码
 
-You cannot terminate accounts — contact your admin if an account needs to be removed.
+你不能终止账户——如果需要移除某个账户，请联系你的管理员。
 
-## Domains
+## 域名
 
-Under each account you can:
+在每个账户下，你可以：
 
-- Add **addon domains** (additional websites on the same account)
-- Add **subdomains**
-- Add **redirects**
-- View the document root for each domain
+- 添加**附加域名**（同一账户上的其他网站）
+- 添加**子域名**
+- 添加**重定向**
+- 查看每个域名的文档根目录
 
-## Email
+## 电子邮件
 
-Manage virtual email addresses for your customers' domains:
+管理你客户域名的虚拟电子邮件地址：
 
-- Create mailboxes (username@domain.com)
-- Set passwords
-- Suspend / reactivate mailboxes
-- Set storage quotas
+- 创建邮箱（username@domain.com）
+- 设置密码
+- 暂停 / 重新激活邮箱
+- 设置存储配额
 
-Customers access their email via the webmail interface at port 8883, or by configuring an email client with the server's hostname.
+客户通过端口 8883 的网络邮件界面访问他们的电子邮件，或通过使用服务器主机名配置电子邮件客户端来访问。
 
-### Webmail SSO
+### 网络邮件单点登录
 
-Customers can be redirected to webmail with a single-sign-on link from the user panel. The SSO token is valid for 5 minutes.
+客户可以从用户面板通过单点登录链接重定向到网络邮件。SSO 令牌有效期为 5 分钟。
 
 ## DNS
 
-View and edit DNS records for accounts you manage. Standard record types are supported (A, AAAA, CNAME, MX, TXT, etc.). Changes are applied live via `rndc reload`.
+查看和编辑你管理的账户的 DNS 记录。支持标准记录类型（A、AAAA、CNAME、MX、TXT 等）。更改通过 `rndc reload` 实时应用。
 
-## Databases
+## 数据库
 
-Create and manage MySQL databases for your customers. Each database is prefixed with the account username to avoid conflicts.
+为你的客户创建和管理 MySQL 数据库。每个数据库都以账户用户名作为前缀，以避免冲突。
 
 ## FTP
 
-Create FTP accounts scoped to specific directories of an account. Useful for giving customers access to subdirectories without full SSH.
+创建范围限定为账户特定目录的 FTP 账户。适用于让客户访问子目录而无需完整 SSH 的情况。
 
 ## Docker
 
-If Docker is enabled on the server, you can:
+如果服务器上启用了 Docker，你可以：
 
-- View containers running under your customers' accounts
-- Set per-customer Docker quotas (max containers, RAM, CPU)
-- Launch one-click app catalog deployments on behalf of a customer
+- 查看你客户账户下运行的容器
+- 设置每个客户的 Docker 配额（最大容器数、内存、CPU）
+- 代表客户启动一键应用目录部署
 
-## White Label
+## 白标
 
-**White Label** lets you brand the reseller panel and user panel with your own identity.
+**White Label** 让你用自己的品牌标识为经销商面板和用户面板打造品牌。
 
-| Setting | Notes |
-|---------|-------|
-| Panel Name | Replaces "NovaCPX" in the panel header |
-| Logo | Upload a PNG/JPG/SVG (max 512 KB) |
-| Favicon | Small icon shown in browser tabs |
-| Primary Color | Main accent color (hex) |
-| Accent Color | Secondary color (hex) |
-| Support Email | Shown in customer-facing error messages |
-| Support URL | Link in the panel footer |
-| Hide "Powered by NovaCPX" | Suppress the footer attribution |
-| Custom CSS | Inject additional CSS into all panel pages |
+| 设置 | 说明 |
+|------|------|
+| 面板名称 | 替换面板页眉中的 "NovaCPX" |
+| Logo | 上传 PNG/JPG/SVG（最大 512 KB） |
+| Favicon | 浏览器标签页中显示的小图标 |
+| 主色调 | 主要强调色（十六进制） |
+| 强调色 | 次要颜色（十六进制） |
+| 支持电子邮件 | 显示在面向客户的错误消息中 |
+| 支持 URL | 面板页脚中的链接 |
+| 隐藏 "Powered by NovaCPX" | 隐藏页脚署名 |
+| 自定义 CSS | 向所有面板页面注入额外的 CSS |
 
-Changes take effect immediately for new page loads.
+更改会在新页面加载时立即生效。
 
-## Customers logging in
+## 客户登录
 
-Your customers log in to the **user panel** at port **8880**. Give them:
+你的客户登录**用户面板**，端口为 **8880**。向他们提供：
 
-- URL: `https://<server-ip>:8880`
-- Their username and password (set when you created their account)
+- URL：`https://<服务器IP>:8880`
+- 他们的用户名和密码（在你创建他们的账户时设置）
 
-From the user panel they can manage their own files, email, databases, FTP accounts, DNS records, SSL certificates, and cron jobs.
+从用户面板，他们可以管理自己的文件、电子邮件、数据库、FTP 账户、DNS 记录、SSL 证书和 cron 任务。
