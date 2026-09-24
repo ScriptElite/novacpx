@@ -1,9 +1,9 @@
 <?php http_response_code(500); ?>
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>500 — Server Error · NovaCPX</title>
+<title>500 — 服务器错误</title>
 <style>
 :root{--bg:#0d0f17;--bg2:#131520;--border:#252840;--text:#e2e4f0;--text-muted:#7c7f9a;--primary:#6366f1;--red:#ef4444}
 *{box-sizing:border-box;margin:0;padding:0}
@@ -28,11 +28,11 @@ p{color:var(--text-muted);margin-bottom:2rem;line-height:1.6}
     <div class="logo-text">Nova<strong>CPX</strong></div>
   </div>
   <div class="code">500</div>
-  <h1>Internal Server Error</h1>
-  <p>Something went wrong on our end. The issue has been logged. Please try again in a moment.</p>
+  <h1>服务器内部错误</h1>
+  <p>服务器开了个小差，问题已被记录，请稍后重试。</p>
   <a href="javascript:history.back()" class="btn">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M19 12H5M12 5l-7 7 7 7"/></svg>
-    Go Back
+    返回上一页
   </a>
 </div>
 </body>
