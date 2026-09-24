@@ -1,15 +1,15 @@
 <?php
-// NovaCPX entry point — redirect based on role or show login
+// NovaCPX 入口点 — 根据角色重定向或显示登录页面
 session_start();
 $redirect = $_GET['redirect'] ?? '';
 $safeRedirect = preg_match('#^/(user|reseller|admin)#', $redirect) ? $redirect : '';
 ?>
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>NovaCPX — Login</title>
+<title>NovaCPX — 登录</title>
 <link rel="icon" type="image/svg+xml" href="/assets/img/favicon.svg">
 <link rel="stylesheet" href="/assets/css/nova.css">
 </head>
@@ -36,18 +36,18 @@ $safeRedirect = preg_match('#^/(user|reseller|admin)#', $redirect) ? $redirect :
   </div>
 
   <div class="login-card">
-    <h1>Sign In</h1>
-    <p class="login-sub">Linux Web Hosting Control Panel</p>
+    <h1>登录</h1>
+    <p class="login-sub">Linux Web 虚拟主机控制面板</p>
 
     <div id="login-error" class="alert alert-error" style="display:none"></div>
 
     <form id="login-form">
       <div class="form-group">
-        <label for="username">Username or Email</label>
+        <label for="username">用户名或邮箱</label>
         <input type="text" id="username" name="username" autocomplete="username" autofocus required>
       </div>
       <div class="form-group">
-        <label for="password">Password</label>
+        <label for="password">密码</label>
         <div class="input-with-icon">
           <input type="password" id="password" name="password" autocomplete="current-password" required>
           <button type="button" class="eye-toggle" data-target="password">
@@ -59,15 +59,15 @@ $safeRedirect = preg_match('#^/(user|reseller|admin)#', $redirect) ? $redirect :
         </div>
       </div>
       <button type="submit" class="btn btn-primary btn-full" id="login-btn">
-        <span class="btn-text">Sign In</span>
-        <span class="btn-spinner" style="display:none">Signing in…</span>
+        <span class="btn-text">登录</span>
+        <span class="btn-spinner" style="display:none">正在登录…</span>
       </button>
     </form>
   </div>
 
   <div class="login-footer">
     NovaCPX v<span id="panel-version">1.0.0</span> &nbsp;|&nbsp;
-    <a href="/api/system/version" target="_blank">System Info</a>
+    <a href="/api/system/version" target="_blank">系统信息</a>
   </div>
 </div>
 
@@ -94,9 +94,9 @@ document.getElementById('login-form').addEventListener('submit', async e => {
       }),
     });
     const data = await res.json();
-    if (!data.success) throw new Error(data.message || 'Login failed');
+    if (!data.success) throw new Error(data.message || '登录失败');
 
-    // Each role redirects to its dedicated port
+    // 每个角色将重定向至其专用端口
     const dest = REDIRECT || data.data.portal_url || '/';
     location.href = dest;
   } catch (ex) {
@@ -108,7 +108,7 @@ document.getElementById('login-form').addEventListener('submit', async e => {
   }
 });
 
-// Password toggle
+// 密码显示/隐藏切换
 document.querySelectorAll('.eye-toggle').forEach(btn => {
   btn.addEventListener('click', () => {
     const inp = document.getElementById(btn.dataset.target);
@@ -116,7 +116,7 @@ document.querySelectorAll('.eye-toggle').forEach(btn => {
   });
 });
 
-// Fetch version
+// 获取版本号
 fetch('/api/auth/me', {credentials:'include'}).then(r => r.json()).then(d => {
   if (d.success) {
     const role = d.data.role;
