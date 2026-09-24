@@ -14,13 +14,13 @@
 ## 快速安装
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/myronblair/novacpx/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ScriptElite/novacpx/main/install.sh | bash
 ```
 
 或下载后手动运行：
 
 ```bash
-wget https://raw.githubusercontent.com/myronblair/novacpx/main/install.sh
+wget https://raw.githubusercontent.com/ScriptElite/novacpx/main/install.sh
 bash install.sh
 ```
 
