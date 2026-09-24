@@ -84,11 +84,11 @@ case "$OS_ID" in
     ;;
   debian)
     case "$OS_VER" in
-      11|12) log "Detected: Debian $OS_VER ($OS_CODENAME)" ;;
-      *) fail "Debian $OS_VER not supported. Use Debian 11 (Bullseye) or 12 (Bookworm)." ;;
+      11|12|13) log "Detected: Debian $OS_VER ($OS_CODENAME)" ;;
+      *) fail "Debian $OS_VER not supported. Use Debian 11 (Bullseye) or 12 (Bookworm) and 13 (Trixie)." ;;
     esac
     ;;
-  *) fail "Unsupported OS: $OS_ID. NovaCPX supports Ubuntu 20/22/24 and Debian 11/12." ;;
+  *) fail "Unsupported OS: $OS_ID. NovaCPX supports Ubuntu 20/22/24 and Debian 11/12/13." ;;
 esac
 
 log "Web server: $WEB_SERVER"
@@ -150,7 +150,7 @@ fi
 
 apt-get update -qq >> "$LOG" 2>&1
 
-PHP_VERSIONS=("7.4" "8.1" "8.2" "8.3")
+PHP_VERSIONS=("7.4" "8.1" "8.2" "8.3" "8.4" "8.5")
 PHP_EXTENSIONS="cli fpm common mysql pgsql sqlite3 gd curl mbstring xml zip bcmath intl soap redis imagick opcache"
 
 for VER in "${PHP_VERSIONS[@]}"; do
@@ -484,7 +484,7 @@ mkdir -p "$WEB_ROOT" "$PANEL_DIR"
 
 if [[ ! -d /opt/novacpx-src ]]; then
   info "Cloning NovaCPX source..."
-  git clone --quiet https://github.com/myronblair/novacpx.git /opt/novacpx-src >> "$LOG" 2>&1
+  git clone --quiet https://github.com/scriptelite/novacpx.git /opt/novacpx-src >> "$LOG" 2>&1
 fi
 
 # Install panel files from GitHub
