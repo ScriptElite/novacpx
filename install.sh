@@ -30,7 +30,7 @@ info() { echo -e "${BLUE}[→]${NC} $*" | tee -a "$LOG"; }
 step() { echo -e "\n${BOLD}━━━ $* ━━━${NC}" | tee -a "$LOG"; }
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
-WEB_SERVER="nginx"
+WEB_SERVER="apache"
 INSTALL_MYSQL=true
 INSTALL_POSTGRES=true
 
