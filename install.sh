@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# NovaCPX Installer — Linux Web Hosting Control Panel
-# Supports: Ubuntu 20.04/22.04/24.04, Debian 11/12
-# Usage: curl -fsSL https://novacpx.io/install.sh | bash
-#        or: bash install.sh [--nginx|--apache] [--no-mysql] [--no-postgres]
+# NovaCPX 安装程序 — Linux Web 主机控制面板
+# 支持系统：Ubuntu 20.04/22.04/24.04，Debian 11/12
+# 使用方法：curl -fsSL https://novacpx.io/install.sh | bash
+#         或：bash install.sh [--nginx|--apache] [--no-mysql] [--no-postgres]
 
 set -euo pipefail
 
@@ -13,13 +13,13 @@ LOG="/var/log/novacpx-install.log"
 DB_PATH="/var/lib/novacpx/panel.db"
 PHP_DEFAULT="8.3"
 
-# ── Panel ports (each tier has its own port) ──────────────────────────────────
-PORT_USER=8880       # End-user panel
-PORT_RESELLER=8881   # Reseller panel
-PORT_ADMIN=8882      # Admin / datacenter panel
-PORT_WEBMAIL=8883    # Roundcube webmail
+# ── 控制面板端口设置（每个层级对应单独的端口）──────────────────────────────────
+PORT_USER=8880       # 终端用户面板
+PORT_RESELLER=8881   # 代理商面板
+PORT_ADMIN=8882      # 管理员 / 数据中心面板
+PORT_WEBMAIL=8883    # Roundcube 网页邮局
 
-# ── Colors ────────────────────────────────────────────────────────────────────
+# ── 颜色样式 ──────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; BOLD='\033[1m'; NC='\033[0m'
 
@@ -29,7 +29,7 @@ fail() { echo -e "${RED}[✗]${NC} $*" | tee -a "$LOG"; exit 1; }
 info() { echo -e "${BLUE}[→]${NC} $*" | tee -a "$LOG"; }
 step() { echo -e "\n${BOLD}━━━ $* ━━━${NC}" | tee -a "$LOG"; }
 
-# ── Argument parsing ──────────────────────────────────────────────────────────
+# ── 参数解析 ──────────────────────────────────────────────────────────────────
 WEB_SERVER="nginx"
 INSTALL_MYSQL=true
 INSTALL_POSTGRES=true
@@ -42,7 +42,6 @@ for arg in "$@"; do
     --no-postgres) INSTALL_POSTGRES=false ;;
   esac
 done
-
 # ── Banner ─────────────────────────────────────────────────────────────────────
 clear 2>/dev/null || true
 cat <<'EOF'
@@ -60,49 +59,49 @@ EOF
 
 echo ""
 
-# ── Preflight checks ──────────────────────────────────────────────────────────
-step "Preflight Checks"
+# ── 预检项目 ──────────────────────────────────────────────────────────────────
+step "预检项目"
 
-[[ $EUID -ne 0 ]] && fail "Must run as root. Use: sudo bash install.sh"
+[[ $EUID -ne 0 ]] && fail "必须以 root 身份运行。请使用：sudo bash install.sh"
 
-# OS detection
+# 操作系统检测
 if [[ -f /etc/os-release ]]; then
   . /etc/os-release
   OS_ID="$ID"
   OS_VER="$VERSION_ID"
   OS_CODENAME="${VERSION_CODENAME:-}"
 else
-  fail "Cannot detect OS. /etc/os-release missing."
+  fail "无法检测操作系统。未找到 /etc/os-release 文件。"
 fi
 
 case "$OS_ID" in
   ubuntu)
     case "$OS_VER" in
-      20.04|22.04|24.04) log "Detected: Ubuntu $OS_VER" ;;
-      *) fail "Ubuntu $OS_VER not supported. Use 20.04, 22.04, or 24.04." ;;
+      20.04|22.04|24.04) log "检测到操作系统：Ubuntu $OS_VER" ;;
+      *) fail "不支持 Ubuntu $OS_VER。请使用 20.04、22.04 或 24.04。" ;;
     esac
     ;;
   debian)
     case "$OS_VER" in
-      11|12|13) log "Detected: Debian $OS_VER ($OS_CODENAME)" ;;
-      *) fail "Debian $OS_VER not supported. Use Debian 11 (Bullseye) or 12 (Bookworm) and 13 (Trixie)." ;;
+      11|12|13) log "检测到操作系统：Debian $OS_VER ($OS_CODENAME)" ;;
+      *) fail "不支持 Debian $OS_VER。请使用 Debian 11 (Bullseye)、12 (Bookworm) 或 13 (Trixie)。" ;;
     esac
     ;;
-  *) fail "Unsupported OS: $OS_ID. NovaCPX supports Ubuntu 20/22/24 and Debian 11/12/13." ;;
+  *) fail "不支持的操作系统：$OS_ID。NovaCPX 支持 Ubuntu 20/22/24 以及 Debian 11/12/13。" ;;
 esac
 
-log "Web server: $WEB_SERVER"
-log "MySQL: $INSTALL_MYSQL | PostgreSQL: $INSTALL_POSTGRES"
+log "Web 服务器：$WEB_SERVER"
+log "MySQL：$INSTALL_MYSQL | PostgreSQL：$INSTALL_POSTGRES"
 
-# Check minimum requirements
+# 检查最低系统要求
 TOTAL_RAM=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
 TOTAL_DISK=$(df / | awk 'NR==2 {print int($4/1024/1024)}')
-log "RAM: ${TOTAL_RAM}MB | Free disk: ${TOTAL_DISK}GB"
-[[ $TOTAL_RAM -lt 512 ]] && warn "Low RAM (${TOTAL_RAM}MB). Recommend 1GB+ for best performance."
-[[ $TOTAL_DISK -lt 5 ]] && fail "Insufficient disk space. Need 5GB+ free."
+log "内存：${TOTAL_RAM}MB | 剩余磁盘空间：${TOTAL_DISK}GB"
+[[ $TOTAL_RAM -lt 512 ]] && warn "内存较低 (${TOTAL_RAM}MB)。建议配置 1GB 以上以获得最佳性能。"
+[[ $TOTAL_DISK -lt 5 ]] && fail "磁盘空间不足。需要 5GB 以上可用空间。"
 
-# ── Generate secrets ──────────────────────────────────────────────────────────
-step "Generating Credentials"
+# ── 生成密钥凭据 ──────────────────────────────────────────────────────────────
+step "正在生成密钥凭据"
 
 DB_WP_USER="novacpx_wp"
 DB_WP_PASS=$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9!@#$' | head -c 20)
@@ -110,37 +109,37 @@ ADMIN_PASS=$(openssl rand -base64 16 | tr -dc 'A-Za-z0-9' | head -c 16)
 SECRET_KEY=$(openssl rand -hex 32)
 mkdir -p /root/.novacpx
 cat > /root/.novacpx/credentials.txt <<CREDS
-NovaCPX Installation Credentials — $(date)
+NovaCPX 安装凭据 — $(date)
 ==========================================
-User Panel:     https://$(hostname -I | awk '{print $1}'):${PORT_USER}
-Reseller Panel: https://$(hostname -I | awk '{print $1}'):${PORT_RESELLER}
-Admin Panel:    https://$(hostname -I | awk '{print $1}'):${PORT_ADMIN}
-Webmail:        https://$(hostname -I | awk '{print $1}'):${PORT_WEBMAIL}
-Admin User:     admin
-Admin Pass:     $ADMIN_PASS
-Panel DB:       ${DB_PATH}  (SQLite — no credentials needed)
-DB WP User:     $DB_WP_USER
-DB WP Pass:     $DB_WP_PASS
+用户面板：       https://$(hostname -I | awk '{print $1}'):${PORT_USER}
+代理商面板：     https://$(hostname -I | awk '{print $1}'):${PORT_RESELLER}
+管理員面板：     https://$(hostname -I | awk '{print $1}'):${PORT_ADMIN}
+网页邮局：       https://$(hostname -I | awk '{print $1}'):${PORT_WEBMAIL}
+管理员账号：     admin
+管理员密码：     $ADMIN_PASS
+面板数据库：     ${DB_PATH}  (SQLite — 无需认证凭据)
+DB WP 用户名：   $DB_WP_USER
+DB WP 密码：     $DB_WP_PASS
 ==========================================
-SAVE THIS FILE. It will not be shown again.
+请妥善保存此文件，它不会再次显示。
 CREDS
 chmod 600 /root/.novacpx/credentials.txt
-log "Credentials saved to /root/.novacpx/credentials.txt"
+log "凭据已保存至 /root/.novacpx/credentials.txt"
 
-# ── System update ─────────────────────────────────────────────────────────────
-step "Updating System Packages"
+# ── 系统更新 ──────────────────────────────────────────────────────────────────
+step "正在更新系统软件包"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq >> "$LOG" 2>&1
 apt-get upgrade -y -qq >> "$LOG" 2>&1
 apt-get install -y -qq curl wget gnupg2 lsb-release ca-certificates \
   software-properties-common apt-transport-https zip unzip git \
   sudo cron logrotate ufw fail2ban sshpass sqlite3 >> "$LOG" 2>&1
-log "System packages updated"
+log "系统软件包更新完成"
 
-# ── PHP multi-version setup ───────────────────────────────────────────────────
-step "Installing PHP (Multi-Version)"
+# ── PHP 多版本安装配置 ────────────────────────────────────────────────────────
+step "正在安装 PHP (多版本)"
 
-# Add ondrej/php PPA for Ubuntu; sury for Debian
+# Ubuntu 使用 ondrej/php PPA 存储库；Debian 使用 sury 存储库
 if [[ "$OS_ID" == "ubuntu" ]]; then
   add-apt-repository -y ppa:ondrej/php >> "$LOG" 2>&1
 elif [[ "$OS_ID" == "debian" ]]; then
@@ -154,35 +153,35 @@ PHP_VERSIONS=("7.4" "8.1" "8.2" "8.3" "8.4" "8.5")
 PHP_EXTENSIONS="cli fpm common mysql pgsql sqlite3 gd curl mbstring xml zip bcmath intl soap redis imagick opcache"
 
 for VER in "${PHP_VERSIONS[@]}"; do
-  info "Installing PHP $VER..."
+  info "正在安装 PHP $VER..."
   PKGS=""
   for EXT in $PHP_EXTENSIONS; do
     PKGS="$PKGS php${VER}-${EXT}"
   done
-  apt-get install -y -qq php${VER} $PKGS >> "$LOG" 2>&1 || warn "PHP $VER: some extensions may not be available"
-  log "PHP $VER installed"
+  apt-get install -y -qq php${VER} $PKGS >> "$LOG" 2>&1 || warn "PHP $VER：部分扩展可能不可用"
+  log "PHP $VER 安装完成"
 done
 
-# Set default PHP CLI
+# 设置默认 PHP CLI 版本
 update-alternatives --set php /usr/bin/php${PHP_DEFAULT} >> "$LOG" 2>&1 || true
-log "Default PHP CLI: $PHP_DEFAULT"
+log "默认 PHP CLI：$PHP_DEFAULT"
 
-# ── Web Server ────────────────────────────────────────────────────────────────
-step "Installing Web Server ($WEB_SERVER)"
+# ── Web 服务器 ────────────────────────────────────────────────────────────────
+step "正在安装 Web 服务器 ($WEB_SERVER)"
 
 if [[ "$WEB_SERVER" == "nginx" ]]; then
   apt-get install -y -qq nginx >> "$LOG" 2>&1
   systemctl enable nginx >> "$LOG" 2>&1
-  # Forward Authorization header to PHP-FPM -- nginx strips it by default, which
-  # silently breaks every Bearer-token API call panel-wide otherwise.
+  # 转发 Authorization 标头至 PHP-FPM —— nginx 默认会剥离该标头，
+  # 否则会导致全面板所有依赖 Bearer-token 的 API 调用静默失效。
   echo 'fastcgi_param HTTP_AUTHORIZATION $http_authorization;' >> /etc/nginx/fastcgi_params
-  log "nginx installed"
+  log "nginx 安装完成"
 
   PANEL_WEB_CONF="/etc/nginx/sites-available/novacpx"
   cat > "$PANEL_WEB_CONF" <<NGXCONF
-# NovaCPX — three panels on three dedicated ports
+# NovaCPX — 运行于三个独立端口上的三个控制面板
 
-# ── User Panel (8880) ─────────────────────────────────────────────────────────
+# ── 用户面板 (8880) ───────────────────────────────────────────────────────────
 server {
     listen ${PORT_USER} ssl http2;
     server_name _;
@@ -197,7 +196,7 @@ server {
     location ~ /\.ht { deny all; }
 }
 
-# ── Reseller Panel (8881) ─────────────────────────────────────────────────────
+# ── 代理商面板 (8881) ─────────────────────────────────────────────────────────
 server {
     listen ${PORT_RESELLER} ssl http2;
     server_name _;
@@ -212,7 +211,7 @@ server {
     location ~ /\.ht { deny all; }
 }
 
-# ── Admin Panel (8882) ────────────────────────────────────────────────────────
+# ── 管理员面板 (8882) ─────────────────────────────────────────────────────────
 server {
     listen ${PORT_ADMIN} ssl http2;
     server_name _;
@@ -228,7 +227,7 @@ server {
 }
 NGXCONF
   ln -sf "$PANEL_WEB_CONF" /etc/nginx/sites-enabled/novacpx
-  # Allow www-data to manage customer vhost configs
+  # 允许 www-data 用户组管理客户的虚拟主机配置文件
   chown root:www-data /etc/nginx/sites-available /etc/nginx/sites-enabled
   chmod 775 /etc/nginx/sites-available /etc/nginx/sites-enabled
 
@@ -236,18 +235,18 @@ else
   apt-get install -y -qq apache2 libapache2-mod-fcgid >> "$LOG" 2>&1
   a2enmod ssl rewrite proxy_fcgi setenvif headers >> "$LOG" 2>&1
   systemctl enable apache2 >> "$LOG" 2>&1
-  log "Apache2 installed"
+  log "Apache2 安装完成"
 
-  # Tell Apache to listen on all four panel ports
+  # 配置 Apache 监听全部四个面板端口
   for PORT in $PORT_USER $PORT_RESELLER $PORT_ADMIN $PORT_WEBMAIL; do
     grep -q "Listen $PORT" /etc/apache2/ports.conf 2>/dev/null || echo "Listen $PORT" >> /etc/apache2/ports.conf
   done
 
   PANEL_WEB_CONF="/etc/apache2/sites-available/novacpx.conf"
   cat > "$PANEL_WEB_CONF" <<APCONF
-# NovaCPX — three panels on three dedicated ports
+# NovaCPX — 运行于三个独立端口上的三个控制面板
 
-# ── User Panel (8880) ─────────────────────────────────────────────────────────
+# ── 用户面板 (8880) ───────────────────────────────────────────────────────────
 <VirtualHost *:${PORT_USER}>
     DocumentRoot ${WEB_ROOT}/user
     SSLEngine on
@@ -266,7 +265,7 @@ else
     Header always set X-NovaCPX-Portal "user"
 </VirtualHost>
 
-# ── Reseller Panel (8881) ─────────────────────────────────────────────────────
+# ── 代理商面板 (8881) ─────────────────────────────────────────────────────────
 <VirtualHost *:${PORT_RESELLER}>
     DocumentRoot ${WEB_ROOT}/reseller
     SSLEngine on
@@ -285,7 +284,7 @@ else
     Header always set X-NovaCPX-Portal "reseller"
 </VirtualHost>
 
-# ── Admin Panel (8882) ────────────────────────────────────────────────────────
+# ── 管理员面板 (8882) ─────────────────────────────────────────────────────────
 <VirtualHost *:${PORT_ADMIN}>
     DocumentRoot ${WEB_ROOT}/admin
     SSLEngine on
@@ -308,38 +307,38 @@ APCONF
   a2enconf php${PHP_DEFAULT}-fpm >> "$LOG" 2>&1 || true
 fi
 
-# Enable PHP-FPM services
+# 启用 PHP-FPM 服务
 for VER in "${PHP_VERSIONS[@]}"; do
   systemctl enable php${VER}-fpm >> "$LOG" 2>&1 && systemctl start php${VER}-fpm >> "$LOG" 2>&1 || true
-  # Allow unlimited execution time so long-running panel tasks (package installs, WP) don't get killed
+  # 允许无限制执行时间，以便长时运行的面板任务（软件包安装、WordPress 等）不会被中断终止
   grep -q "php_admin_value\[max_execution_time\]" /etc/php/${VER}/fpm/pool.d/www.conf 2>/dev/null || \
     echo "php_admin_value[max_execution_time] = 0" >> /etc/php/${VER}/fpm/pool.d/www.conf
 done
 
 # ── MySQL ─────────────────────────────────────────────────────────────────────
 if $INSTALL_MYSQL; then
-  step "Installing MySQL 8"
+  step "正在安装 MySQL 8"
   apt-get install -y -qq mysql-server >> "$LOG" 2>&1
   systemctl enable mysql >> "$LOG" 2>&1
   systemctl start mysql >> "$LOG" 2>&1
-  # Privileged user for WordPress DB provisioning (CREATE DATABASE + CREATE USER + GRANT)
+  # 用于 WordPress 数据库调配的高权用户（创建数据库 + 创建用户 + 授权）
   mysql -e "CREATE USER IF NOT EXISTS '${DB_WP_USER}'@'localhost' IDENTIFIED BY '${DB_WP_PASS}';" >> "$LOG" 2>&1
   mysql -e "GRANT ALL PRIVILEGES ON \`wp\_%\`.* TO '${DB_WP_USER}'@'localhost';" >> "$LOG" 2>&1
   mysql -e "GRANT CREATE USER ON *.* TO '${DB_WP_USER}'@'localhost' WITH GRANT OPTION;" >> "$LOG" 2>&1
   mysql -e "FLUSH PRIVILEGES;" >> "$LOG" 2>&1
-  log "MySQL installed and database created"
+  log "MySQL 安装完成且数据库创建完毕"
 fi
 
 # ── PostgreSQL ────────────────────────────────────────────────────────────────
 if $INSTALL_POSTGRES; then
-  step "Installing PostgreSQL"
+  step "正在安装 PostgreSQL"
   apt-get install -y -qq postgresql postgresql-contrib >> "$LOG" 2>&1
   systemctl enable postgresql >> "$LOG" 2>&1
-  log "PostgreSQL installed"
+  log "PostgreSQL 安装完成"
 fi
 
 # ── BIND9 DNS ─────────────────────────────────────────────────────────────────
-step "Installing BIND9 DNS Server"
+step "正在安装 BIND9 DNS 服务器"
 apt-get install -y -qq bind9 bind9utils bind9-doc >> "$LOG" 2>&1
 systemctl enable named >> "$LOG" 2>&1
 
@@ -356,26 +355,26 @@ options {
 BINDCONF
 
 systemctl restart named >> "$LOG" 2>&1
-log "BIND9 DNS installed"
+log "BIND9 DNS 安装完成"
 
-# ── Postfix + Dovecot (Mail) ──────────────────────────────────────────────────
-step "Installing Mail Server (Postfix + Dovecot)"
+# ── Postfix + Dovecot (邮件服务器) ───────────────────────────────────────────
+step "正在安装邮件服务器 (Postfix + Dovecot)"
 HOSTNAME=$(hostname -f)
 debconf-set-selections <<< "postfix postfix/mailname string $HOSTNAME"
 debconf-set-selections <<< "postfix postfix/main_mailer_type string 'Internet Site'"
 apt-get install -y -qq postfix postfix-mysql dovecot-core dovecot-imapd \
   dovecot-pop3d dovecot-lmtpd dovecot-mysql spamassassin >> "$LOG" 2>&1
 systemctl enable postfix dovecot >> "$LOG" 2>&1
-log "Mail server installed (Postfix + Dovecot)"
+log "邮件服务器安装完成 (Postfix + Dovecot)"
 
 # ── ProFTPD ───────────────────────────────────────────────────────────────────
-step "Installing ProFTPD"
+step "正在安装 ProFTPD"
 apt-get install -y -qq proftpd-basic proftpd-mod-mysql >> "$LOG" 2>&1
 systemctl enable proftpd >> "$LOG" 2>&1
-log "ProFTPD installed"
+log "ProFTPD 安装完成"
 
 # ── OpenDKIM ─────────────────────────────────────────────────────────────────
-step "Installing OpenDKIM"
+step "正在安装 OpenDKIM"
 apt-get install -y -qq opendkim opendkim-tools >> "$LOG" 2>&1
 mkdir -p /etc/opendkim/keys
 cat >> /etc/opendkim/opendkim.conf <<DKIM
@@ -389,34 +388,34 @@ DKIM
 touch /etc/opendkim/key.table /etc/opendkim/signing.table
 echo "127.0.0.1\nlocalhost" > /etc/opendkim/trusted.hosts
 chown -R opendkim:opendkim /etc/opendkim
-# Wire opendkim into Postfix
+# 将 OpenDKIM 集成接入 Postfix
 postconf -e "milter_default_action = accept" >> "$LOG" 2>&1
 postconf -e "smtpd_milters = local:/run/opendkim/opendkim.sock" >> "$LOG" 2>&1
 postconf -e "non_smtpd_milters = local:/run/opendkim/opendkim.sock" >> "$LOG" 2>&1
 systemctl enable opendkim >> "$LOG" 2>&1
-log "OpenDKIM installed"
+log "OpenDKIM 安装完成"
 
-# ── SSL Certificate ───────────────────────────────────────────────────────────
-step "Generating Self-Signed SSL (Panel)"
+# ── SSL 证书 ─────────────────────────────────────────────────────────────────
+step "正在生成自签名 SSL 证书 (面板专享)"
 mkdir -p /etc/novacpx/ssl
 openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
   -keyout /etc/novacpx/ssl/novacpx.key \
   -out /etc/novacpx/ssl/novacpx.crt \
   -subj "/CN=$(hostname -I | awk '{print $1}')/O=NovaCPX/C=US" >> "$LOG" 2>&1
 chmod 600 /etc/novacpx/ssl/novacpx.key
-log "SSL certificate generated"
+log "SSL 证书生成完毕"
 
-# Install certbot for Let's Encrypt
+# 安装用于 Let's Encrypt 的 certbot
 apt-get install -y -qq certbot >> "$LOG" 2>&1
-log "Certbot installed for Let's Encrypt SSL"
+log "已安装用于 Let's Encrypt SSL 的 Certbot"
 
 # ── Roundcube Webmail ─────────────────────────────────────────────────────────
-step "Installing Roundcube Webmail (port ${PORT_WEBMAIL})"
+step "正在安装 Roundcube Webmail (端口 ${PORT_WEBMAIL})"
 apt-get install -y -qq roundcube roundcube-mysql php8.3-intl php8.3-ldap >> "$LOG" 2>&1
 RC_ROOT="/usr/share/roundcube"
 mkdir -p /etc/novacpx/roundcube
 
-# Roundcube config
+# Roundcube 配置
 RC_DB_PASS=$(openssl rand -base64 16 | tr -dc 'A-Za-z0-9' | head -c 16)
 mysql -e "CREATE DATABASE IF NOT EXISTS roundcube CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" >> "$LOG" 2>&1
 mysql -e "CREATE USER IF NOT EXISTS 'roundcube'@'localhost' IDENTIFIED BY '${RC_DB_PASS}';" >> "$LOG" 2>&1
@@ -437,7 +436,7 @@ cat > /etc/roundcube/config.inc.php <<RCCONF
 \$config['product_name'] = 'NovaCPX Webmail';
 RCCONF
 
-# Webmail vhost on port 8883
+# 8883 端口上的 Webmail 虚拟主机配置
 if [[ "$WEB_SERVER" == "nginx" ]]; then
   cat >> "$PANEL_WEB_CONF" <<WMNGX
 
@@ -476,18 +475,18 @@ else
 WMAP
 fi
 
-log "Roundcube webmail installed on port ${PORT_WEBMAIL}"
+log "Roundcube webmail 已成功安装于端口 ${PORT_WEBMAIL}"
 
-# ── Panel installation ────────────────────────────────────────────────────────
-step "Installing NovaCPX Panel"
+# ── 面板安装 ──────────────────────────────────────────────────────────────────
+step "正在安装 NovaCPX 面板"
 mkdir -p "$WEB_ROOT" "$PANEL_DIR"
 
 if [[ ! -d /opt/novacpx-src ]]; then
-  info "Cloning NovaCPX source..."
+  info "正在克隆 NovaCPX 源码..."
   git clone --quiet https://github.com/scriptelite/novacpx.git /opt/novacpx-src >> "$LOG" 2>&1
 fi
 
-# Install panel files from GitHub
+# 从 GitHub 安装面板文件
 if [[ -d /opt/novacpx-src ]]; then
   cp -r /opt/novacpx-src/panel/public/. "$WEB_ROOT/"
   mkdir -p "$WEB_ROOT/api" "$WEB_ROOT/lib"
@@ -497,7 +496,7 @@ if [[ -d /opt/novacpx-src ]]; then
   cp /opt/novacpx-src/VERSION "$WEB_ROOT/VERSION" 2>/dev/null || true
 fi
 
-# Write config
+# 写入配置文件
 mkdir -p /etc/novacpx
 cat > /etc/novacpx/config.ini <<CONFIG
 [database]
@@ -521,41 +520,41 @@ CONFIG
 chown root:www-data /etc/novacpx/config.ini
 chmod 640 /etc/novacpx/config.ini
 
-# Create SQLite panel database
+# 创建 SQLite 面板数据库
 mkdir -p /var/lib/novacpx
 if [[ -f /opt/novacpx-src/db/schema.sql ]]; then
   sqlite3 "$DB_PATH" < /opt/novacpx-src/db/schema.sql >> "$LOG" 2>&1
-  # Create admin user
+  # 创建管理员账号
   ADMIN_HASH=$(php -r "echo password_hash('${ADMIN_PASS}', PASSWORD_BCRYPT);")
   sqlite3 "$DB_PATH" "INSERT OR REPLACE INTO users (username,password,email,role,status) VALUES ('admin','${ADMIN_HASH}','root@localhost','admin','active');" >> "$LOG" 2>&1
-  # Seed proxy defaults
+  # 填充反向代理默认设置
   sqlite3 "$DB_PATH" "INSERT OR IGNORE INTO settings (key, value) VALUES ('proxy_mode','disabled'),('proxy_apache_port','80');" >> "$LOG" 2>&1
-  log "SQLite panel database created and admin user seeded"
+  log "SQLite 面板数据库已创建，管理员账号已填充"
 fi
 chown www-data:www-data /var/lib/novacpx
 chown www-data:www-data "$DB_PATH"
 chmod 660 "$DB_PATH"
 
-# Set permissions
+# 设置目录权限
 chown -R www-data:www-data "$WEB_ROOT"
 chmod -R 750 "$WEB_ROOT"
 
-# ── Firewall ──────────────────────────────────────────────────────────────────
-step "Configuring Firewall (UFW)"
+# ── 防火墙配置 ────────────────────────────────────────────────────────────────
+step "正在配置防火墙 (UFW)"
 ufw --force reset >> "$LOG" 2>&1
 ufw default deny incoming >> "$LOG" 2>&1
 ufw default allow outgoing >> "$LOG" 2>&1
 ufw allow ssh >> "$LOG" 2>&1
 ufw allow 80/tcp >> "$LOG" 2>&1    # HTTP
 ufw allow 443/tcp >> "$LOG" 2>&1   # HTTPS
-ufw allow ${PORT_USER}/tcp     >> "$LOG" 2>&1  # NovaCPX user panel
-ufw allow ${PORT_RESELLER}/tcp >> "$LOG" 2>&1  # NovaCPX reseller panel
-ufw allow ${PORT_ADMIN}/tcp    >> "$LOG" 2>&1  # NovaCPX admin panel
-ufw allow ${PORT_WEBMAIL}/tcp  >> "$LOG" 2>&1  # Roundcube webmail
+ufw allow ${PORT_USER}/tcp     >> "$LOG" 2>&1  # NovaCPX 用户面板
+ufw allow ${PORT_RESELLER}/tcp >> "$LOG" 2>&1  # NovaCPX 代理商面板
+ufw allow ${PORT_ADMIN}/tcp    >> "$LOG" 2>&1  # NovaCPX 管理员面板
+ufw allow ${PORT_WEBMAIL}/tcp  >> "$LOG" 2>&1  # Roundcube 网页邮局
 ufw allow 21/tcp >> "$LOG" 2>&1    # FTP
-ufw allow 20/tcp >> "$LOG" 2>&1    # FTP data
+ufw allow 20/tcp >> "$LOG" 2>&1    # FTP 数据传输
 ufw allow 25/tcp >> "$LOG" 2>&1    # SMTP
-ufw allow 587/tcp >> "$LOG" 2>&1   # SMTP submission
+ufw allow 587/tcp >> "$LOG" 2>&1   # SMTP 提交
 ufw allow 465/tcp >> "$LOG" 2>&1   # SMTPS
 ufw allow 110/tcp >> "$LOG" 2>&1   # POP3
 ufw allow 995/tcp >> "$LOG" 2>&1   # POP3S
@@ -564,17 +563,17 @@ ufw allow 993/tcp >> "$LOG" 2>&1   # IMAPS
 ufw allow 53/tcp >> "$LOG" 2>&1    # DNS
 ufw allow 53/udp >> "$LOG" 2>&1    # DNS
 ufw --force enable >> "$LOG" 2>&1
-log "Firewall configured"
+log "防火墙配置完成"
 
-# ── Fail2Ban ─────────────────────────────────────────────────────────────────
-step "Configuring Fail2Ban"
+# ── Fail2Ban 防护配置 ─────────────────────────────────────────────────────────
+step "正在配置 Fail2Ban"
 
-# Auto-detect local IPs to whitelist (loopback + all private interface IPs + their /24 subnets)
+# 自动检测本地 IP 并列入白名单（本地环回 + 所有私有网卡 IP + 其对应的 /24 子网）
 LOCAL_IPS="127.0.0.0/8 ::1"
 while read -r cidr; do
   ip="${cidr%%/*}"
   LOCAL_IPS="$LOCAL_IPS $ip"
-  # Add /24 subnet for private ranges
+  # 为私有 IP 网段自动追加 /24 子网
   case "$ip" in
     10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*)
       subnet=$(echo "$ip" | awk -F. '{print $1"."$2"."$3".0/24"}')
@@ -582,9 +581,9 @@ while read -r cidr; do
       ;;
   esac
 done < <(ip -4 addr show 2>/dev/null | grep 'inet ' | awk '{print $2}')
-# Deduplicate
+# 去重处理
 LOCAL_IPS=$(echo "$LOCAL_IPS" | tr ' ' '\n' | sort -u | tr '\n' ' ')
-log "Fail2Ban whitelist: $LOCAL_IPS"
+log "Fail2Ban 白名单列表：$LOCAL_IPS"
 
 cat > /etc/fail2ban/jail.local <<F2B
 [DEFAULT]
@@ -623,7 +622,7 @@ F2B
 chown root:www-data /etc/fail2ban/jail.local
 chmod 664 /etc/fail2ban/jail.local
 
-# Install NovaCPX filter definitions
+# 安装 NovaCPX 过滤规则定义文件
 for jail in novacpx-user novacpx-reseller novacpx-admin novacpx-webmail; do
   cp /opt/novacpx-src/deploy/fail2ban/${jail}.conf /etc/fail2ban/filter.d/ 2>/dev/null || \
   cat > /etc/fail2ban/filter.d/${jail}.conf << 'FILTER'
@@ -633,7 +632,7 @@ ignoreregex =
 FILTER
 done
 
-# Create NovaCPX access log writable by www-data
+# 创建供 www-data 可写的 NovaCPX 访问日志文件
 mkdir -p /var/log/novacpx
 chown www-data:www-data /var/log/novacpx
 touch /var/log/novacpx/access.log
@@ -642,12 +641,12 @@ chmod 664 /var/log/novacpx/access.log
 
 systemctl enable fail2ban >> "$LOG" 2>&1
 systemctl restart fail2ban >> "$LOG" 2>&1
-log "Fail2Ban configured"
+log "Fail2Ban 配置完成"
 
-# ── Sudoers for NovaCPX panel (www-data needs root for firewall/opendkim) ────
+# ── NovaCPX 面板的 Sudoers 权限配置（www-data 需要 root 权限以管理防火墙/OpenDKIM 等） ──
 cat > /etc/sudoers.d/novacpx-firewall <<SUDOERS
 Defaults:www-data !requiretty
-# Firewall / security
+# 防火墙 / 安全
 www-data ALL=(root) NOPASSWD: /usr/sbin/ufw status
 www-data ALL=(root) NOPASSWD: /usr/sbin/ufw status verbose
 www-data ALL=(root) NOPASSWD: /usr/sbin/ufw allow *
@@ -658,7 +657,7 @@ www-data ALL=(root) NOPASSWD: /usr/sbin/ufw enable
 www-data ALL=(root) NOPASSWD: /usr/sbin/ufw disable
 www-data ALL=(root) NOPASSWD: /usr/sbin/ufw logging *
 www-data ALL=(root) NOPASSWD: /usr/bin/fail2ban-client *
-# Web servers
+# Web 服务器
 www-data ALL=(root) NOPASSWD: /bin/systemctl start apache2
 www-data ALL=(root) NOPASSWD: /bin/systemctl stop apache2
 www-data ALL=(root) NOPASSWD: /bin/systemctl restart apache2
@@ -670,7 +669,7 @@ www-data ALL=(root) NOPASSWD: /bin/systemctl restart nginx
 www-data ALL=(root) NOPASSWD: /bin/systemctl reload nginx
 www-data ALL=(root) NOPASSWD: /bin/systemctl enable nginx
 www-data ALL=(root) NOPASSWD: /usr/sbin/nginx *
-# Mail servers
+# 邮件服务器
 www-data ALL=(root) NOPASSWD: /bin/systemctl start postfix
 www-data ALL=(root) NOPASSWD: /bin/systemctl stop postfix
 www-data ALL=(root) NOPASSWD: /bin/systemctl restart postfix
@@ -685,7 +684,7 @@ www-data ALL=(root) NOPASSWD: /bin/systemctl restart rspamd
 www-data ALL=(root) NOPASSWD: /bin/systemctl enable rspamd
 www-data ALL=(root) NOPASSWD: /bin/systemctl disable rspamd
 www-data ALL=(root) NOPASSWD: /usr/sbin/postqueue -f
-# FTP servers
+# FTP 服务器
 www-data ALL=(root) NOPASSWD: /bin/systemctl start proftpd
 www-data ALL=(root) NOPASSWD: /bin/systemctl stop proftpd
 www-data ALL=(root) NOPASSWD: /bin/systemctl restart proftpd
@@ -699,7 +698,7 @@ www-data ALL=(root) NOPASSWD: /bin/systemctl start pure-ftpd
 www-data ALL=(root) NOPASSWD: /bin/systemctl stop pure-ftpd
 www-data ALL=(root) NOPASSWD: /bin/systemctl restart pure-ftpd
 www-data ALL=(root) NOPASSWD: /bin/systemctl enable pure-ftpd
-# DNS servers
+# DNS 服务器
 www-data ALL=(root) NOPASSWD: /bin/systemctl start named
 www-data ALL=(root) NOPASSWD: /bin/systemctl stop named
 www-data ALL=(root) NOPASSWD: /bin/systemctl restart named
@@ -713,19 +712,19 @@ www-data ALL=(root) NOPASSWD: /bin/systemctl restart pdns
 www-data ALL=(root) NOPASSWD: /bin/systemctl start nsd
 www-data ALL=(root) NOPASSWD: /bin/systemctl stop nsd
 www-data ALL=(root) NOPASSWD: /bin/systemctl restart nsd
-# Database servers
+# 数据库服务器
 www-data ALL=(root) NOPASSWD: /bin/systemctl start mysql
 www-data ALL=(root) NOPASSWD: /bin/systemctl stop mysql
 www-data ALL=(root) NOPASSWD: /bin/systemctl restart mysql
 www-data ALL=(root) NOPASSWD: /bin/systemctl start mariadb
 www-data ALL=(root) NOPASSWD: /bin/systemctl stop mariadb
 www-data ALL=(root) NOPASSWD: /bin/systemctl restart mariadb
-# Security
+# 安全服务
 www-data ALL=(root) NOPASSWD: /bin/systemctl start fail2ban
 www-data ALL=(root) NOPASSWD: /bin/systemctl stop fail2ban
 www-data ALL=(root) NOPASSWD: /bin/systemctl restart fail2ban
 www-data ALL=(root) NOPASSWD: /bin/systemctl reload fail2ban
-# PHP-FPM
+# PHP-FPM 服务
 www-data ALL=(root) NOPASSWD: /bin/systemctl reload php*-fpm
 www-data ALL=(root) NOPASSWD: /bin/systemctl restart php*-fpm
 www-data ALL=(root) NOPASSWD: /bin/systemctl start php*-fpm
@@ -733,7 +732,7 @@ www-data ALL=(root) NOPASSWD: /bin/systemctl stop php*-fpm
 www-data ALL=(root) NOPASSWD: /usr/bin/tee /etc/php/*/fpm/pool.d/*
 www-data ALL=(root) NOPASSWD: /bin/rm -f /etc/php/*/fpm/pool.d/*.conf
 www-data ALL=(root) NOPASSWD: /usr/bin/rm -f /etc/php/*/fpm/pool.d/*.conf
-# Web config file management (scoped paths only)
+# Web 配置文件管理（仅限指定作用域路径）
 www-data ALL=(root) NOPASSWD: /usr/bin/tee /etc/nginx/conf.d/*
 www-data ALL=(root) NOPASSWD: /usr/bin/tee /etc/nginx/sites-available/*
 www-data ALL=(root) NOPASSWD: /usr/bin/tee /etc/nginx/sites-enabled/*
@@ -741,7 +740,7 @@ www-data ALL=(root) NOPASSWD: /usr/bin/tee /etc/apache2/conf-enabled/*
 www-data ALL=(root) NOPASSWD: /bin/ln -sf /etc/nginx/sites-available/* /etc/nginx/sites-enabled/*
 www-data ALL=(root) NOPASSWD: /bin/rm /etc/nginx/sites-available/novacpx-*
 www-data ALL=(root) NOPASSWD: /bin/rm /etc/nginx/sites-enabled/novacpx-*
-# Account management (user creation and home directories)
+# 账号管理（用户创建与家目录管理）
 www-data ALL=(root) NOPASSWD: /usr/sbin/useradd *
 www-data ALL=(root) NOPASSWD: /usr/sbin/userdel *
 www-data ALL=(root) NOPASSWD: /usr/sbin/usermod *
@@ -749,19 +748,19 @@ www-data ALL=(root) NOPASSWD: /usr/sbin/chpasswd
 www-data ALL=(root) NOPASSWD: /bin/mkdir *
 www-data ALL=(root) NOPASSWD: /bin/chown *
 www-data ALL=(root) NOPASSWD: /bin/chmod *
-# SSL and DKIM
+# SSL 与 DKIM 密钥
 www-data ALL=(root) NOPASSWD: /usr/bin/certbot *
 www-data ALL=(root) NOPASSWD: /usr/bin/opendkim-genkey *
 www-data ALL=(root) NOPASSWD: /usr/sbin/rndc reload
 www-data ALL=(root) NOPASSWD: /usr/sbin/named-checkzone *
 SUDOERS
 chmod 440 /etc/sudoers.d/novacpx-firewall
-log "Sudoers rules installed"
+log "Sudoers 提权规则已安装"
 
-# ── Cron jobs ─────────────────────────────────────────────────────────────────
-step "Setting Up Cron Jobs"
+# ── 定时任务 (Cron) ───────────────────────────────────────────────────────────
+step "正在设置定时任务 (Cron Jobs)"
 cat > /etc/cron.d/novacpx <<CRON
-# NovaCPX system cron jobs
+# NovaCPX 系统定时任务
 */5  * * * * www-data /usr/bin/php${PHP_DEFAULT} ${WEB_ROOT}/bin/collect-stats.php >> /var/log/novacpx/cron.log 2>&1
 0    0 * * * www-data /usr/bin/php${PHP_DEFAULT} ${WEB_ROOT}/bin/notify-checks.php >> /var/log/novacpx/cron.log 2>&1
 0    * * * * root     /usr/local/bin/novacpx-ssl-renew >> /var/log/novacpx/ssl.log 2>&1
@@ -769,20 +768,20 @@ cat > /etc/cron.d/novacpx <<CRON
 */1  * * * * root     /usr/local/bin/novacpx-dns-sync >> /var/log/novacpx/dns.log 2>&1
 CRON
 
-# PHP-FPM pool cleanup + deferred reload (runs every minute as root)
-# Removes orphaned pool configs for deleted Linux users before reloading,
-# preventing php-fpm from failing to start due to missing user references.
+# PHP-FPM 池清理 + 延迟重载（以 root 权限每分钟运行一次）
+# 在重载前清理已删除 Linux 用户的孤立 Pool 配置文件，
+# 避免 PHP-FPM 因找不到引用的用户而导致服务启动失败。
 ((crontab -l 2>/dev/null || true) | grep -v "novacpx-fpm-reload" || true; echo '* * * * * for f in /etc/php/*/fpm/pool.d/*.conf; do [[ "$f" == *"www.conf"* ]] && continue; u=$(basename "$f" .conf); id "$u" &>/dev/null || rm -f "$f"; done; for flag in /tmp/novacpx-fpm-reload-*; do [ -f "$flag" ] && ver=$(basename "$flag" | sed s/novacpx-fpm-reload-//) && rm -f "$flag" && systemctl reload php${ver}-fpm 2>/dev/null; done') | crontab -
 mkdir -p /var/log/novacpx
-log "Cron jobs installed"
+log "定时任务设置完成"
 
-# ── Disable conflicting web servers ───────────────────────────────────────────
-step "Disabling Conflicting Web Servers"
+# ── 禁用冲突的 Web 服务器 ──────────────────────────────────────────────────────
+step "正在禁用冲突的 Web 服务器"
 if [[ "$WEB_SERVER" == "nginx" ]]; then
   systemctl stop apache2 2>/dev/null || true
   systemctl disable apache2 2>/dev/null || true
-  # Replace nginx default site with a 444 connection-close so unmatched
-  # vhosts don't accidentally serve Apache's default HTML page
+  # 将 Nginx 默认站点替换为 444 连接直接关闭，
+  # 避免未匹配的虚拟主机意外展示 Apache 的默认 HTML 页面
   cat > /etc/nginx/sites-available/default <<'NGINXDEFAULT'
 server {
     listen 80 default_server;
@@ -791,11 +790,11 @@ server {
     return 444;
 }
 NGINXDEFAULT
-  log "Apache2 disabled; nginx default site set to return 444"
+  log "Apache2 已禁用；Nginx 默认站点已设置为返回 444 错误码"
 fi
 
-# ── Restart services ──────────────────────────────────────────────────────────
-step "Disabling php-fpm systemd sandboxing (panel needs to write /etc, /home)"
+# ── 重启服务 ──────────────────────────────────────────────────────────────────
+step "正在禁用 php-fpm 的 systemd 沙盒隔离（面板需要读写 /etc 与 /home 目录）"
 for VER in "${PHP_VERSIONS[@]}"; do
   mkdir -p /etc/systemd/system/php${VER}-fpm.service.d
   cat > /etc/systemd/system/php${VER}-fpm.service.d/override.conf <<OVERRIDE
@@ -808,9 +807,9 @@ systemctl daemon-reload >> "$LOG" 2>&1
 for VER in "${PHP_VERSIONS[@]}"; do
   systemctl restart php${VER}-fpm >> "$LOG" 2>&1
 done
-log "php-fpm sandboxing overridden"
+log "php-fpm 沙盒限制已解除"
 
-step "Starting All Services"
+step "正在启动所有服务"
 if [[ "$WEB_SERVER" == "nginx" ]]; then
   systemctl restart nginx >> "$LOG" 2>&1
 else
@@ -818,24 +817,24 @@ else
 fi
 $INSTALL_MYSQL && systemctl restart mysql >> "$LOG" 2>&1
 systemctl restart postfix dovecot proftpd named opendkim >> "$LOG" 2>&1
-log "All services started"
+log "所有服务已成功启动"
 
-# ── Done ─────────────────────────────────────────────────────────────────────
+# ── 完成 ──────────────────────────────────────────────────────────────────────
 SERVER_IP=$(hostname -I | awk '{print $1}')
 cat <<DONE
 
   ╔══════════════════════════════════════════════════════════════╗
-  ║             NovaCPX Installation Complete!                  ║
+  ║                 NovaCPX 安装完成！                           ║
   ╠══════════════════════════════════════════════════════════════╣
-  ║  User Panel:     https://${SERVER_IP}:${PORT_USER}
-  ║  Reseller Panel: https://${SERVER_IP}:${PORT_RESELLER}
-  ║  Admin Panel:    https://${SERVER_IP}:${PORT_ADMIN}
-  ║  Webmail:        https://${SERVER_IP}:${PORT_WEBMAIL}
-  ║  Username:       admin
-  ║  Password:       ${ADMIN_PASS}
+  ║  用户面板：     https://${SERVER_IP}:${PORT_USER}
+  ║  代理商面板：   https://${SERVER_IP}:${PORT_RESELLER}
+  ║  管理员面板：   https://${SERVER_IP}:${PORT_ADMIN}
+  ║  网页邮局：     https://${SERVER_IP}:${PORT_WEBMAIL}
+  ║  管理员账号：   admin
+  ║  管理员密码：   ${ADMIN_PASS}
   ╠══════════════════════════════════════════════════════════════╣
-  ║  Credentials: /root/.novacpx/credentials.txt                ║
-  ║  Install log: ${LOG}
+  ║  认证凭据存储于： /root/.novacpx/credentials.txt            ║
+  ║  安装日志路径：   ${LOG}
   ╚══════════════════════════════════════════════════════════════╝
 
 DONE
