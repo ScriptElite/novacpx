@@ -1,16 +1,16 @@
-# NovaCPX — API Reference
+# NovaCPX — API 参考
 
-## Overview
+## 概述
 
-All API endpoints are served under `/api/<resource>/<action>`.
+所有 API 端点均在 `/api/<resource>/<action>` 下提供服务。
 
-**Base URL pattern:** `https://<server>:<port>/api/<resource>/<action>`
+**基础 URL 模式：** `https://<server>:<port>/api/<resource>/<action>`
 
-The same API is available on all three panel ports (8880, 8881, 8882). Which actions succeed depends on the role of the authenticated session.
+同一套 API 在三个面板端口（8880、8881、8882）上均可用。哪些操作能够成功取决于已认证会话的角色。
 
-### Authentication
+### 认证
 
-All endpoints (except `auth/login`) require an active session cookie `ncpx_session`. Obtain it by calling `auth/login`.
+所有端点（除 `auth/login` 外）都需要一个活动的会话 Cookie `ncpx_session`。通过调用 `auth/login` 获取它。
 
 ```http
 POST /api/auth/login
@@ -19,11 +19,11 @@ Content-Type: application/json
 {"username": "admin", "password": "Nova2026!!"}
 ```
 
-The response sets the `ncpx_session` cookie. Include it in all subsequent requests (`credentials: 'include'` in fetch, or `-b cookies.txt` in curl).
+响应会设置 `ncpx_session` Cookie。在所有后续请求中包含它（在 fetch 中使用 `credentials: 'include'`，或在 curl 中使用 `-b cookies.txt`）。
 
-### Response format
+### 响应格式
 
-Every response is JSON:
+每个响应都是 JSON：
 
 ```json
 {
@@ -33,7 +33,7 @@ Every response is JSON:
 }
 ```
 
-On error:
+出错时：
 
 ```json
 {
@@ -43,7 +43,7 @@ On error:
 }
 ```
 
-Paginated responses include a `meta` block:
+分页响应包含一个 `meta` 块：
 
 ```json
 {
@@ -52,22 +52,22 @@ Paginated responses include a `meta` block:
 }
 ```
 
-### Role access
+### 角色访问权限
 
-| Role | Panels | Access |
-|------|--------|--------|
-| `admin` | 8882 | Everything |
-| `reseller` | 8881 | Own accounts + reseller features |
-| `user` | 8880 | Own account only |
+| 角色 | 面板 | 访问权限 |
+|------|------|---------|
+| `admin` | 8882 | 全部 |
+| `reseller` | 8881 | 自己的账户 + 经销商功能 |
+| `user` | 8880 | 仅自己的账户 |
 
-### Rate limiting
+### 速率限制
 
-| Scope | Limit |
-|-------|-------|
-| Login (`auth/login`) | 10 requests / minute |
-| All other endpoints | 120 requests / minute |
+| 范围 | 限制 |
+|------|------|
+| 登录（`auth/login`） | 10 次请求 / 分钟 |
+| 所有其他端点 | 120 次请求 / 分钟 |
 
-Exceeded limits return HTTP 429 with `Retry-After` and `X-RateLimit-*` headers.
+超出限制会返回 HTTP 429，并带有 `Retry-After` 和 `X-RateLimit-*` 响应头。
 
 ---
 
@@ -75,31 +75,31 @@ Exceeded limits return HTTP 429 with `Retry-After` and `X-RateLimit-*` headers.
 
 ### `POST /api/auth/login`
 
-Authenticate and create a session.
+认证并创建会话。
 
-**Body:** `{username, password}`  
-**Returns:** `{user: {id, username, role}, portal_url}`  
-**Access:** Public
+**请求体：** `{username, password}`  
+**返回：** `{user: {id, username, role}, portal_url}`  
+**访问权限：** 公开
 
 ### `GET /api/auth/me`
 
-Return the current session's user object.
+返回当前会话的用户对象。
 
-**Returns:** `{id, username, email, role}`  
-**Access:** Any authenticated user
+**返回：** `{id, username, email, role}`  
+**访问权限：** 任意已认证用户
 
 ### `POST /api/auth/logout`
 
-Destroy the current session.
+销毁当前会话。
 
-**Access:** Any authenticated user
+**访问权限：** 任意已认证用户
 
 ### `POST /api/auth/change-password`
 
-Change the current user's own password.
+更改当前用户自己的密码。
 
-**Body:** `{current_password, new_password, confirm_password}`  
-**Access:** Any authenticated user
+**请求体：** `{current_password, new_password, confirm_password}`  
+**访问权限：** 任意已认证用户
 
 ---
 
@@ -107,23 +107,23 @@ Change the current user's own password.
 
 ### `GET /api/accounts/list`
 
-List hosting accounts.
+列出主机账户。
 
-**Query params:** `page`, `per_page`, `search`, `status`  
-**Returns:** Paginated list with domain_count, email_count, db_count per account  
-**Access:** Admin (all accounts), Reseller (own accounts)
+**查询参数：** `page`、`per_page`、`search`、`status`  
+**返回：** 分页列表，每个账户包含 domain_count、email_count、db_count  
+**访问权限：** 管理员（所有账户）、经销商（自己的账户）
 
 ### `GET /api/accounts/get?id=<id>`
 
-Get a single account with its domains and disk usage.
+获取单个账户及其域名和磁盘使用情况。
 
-**Access:** Admin, Reseller (own accounts)
+**访问权限：** 管理员、经销商（自己的账户）
 
 ### `POST /api/accounts/create`
 
-Create a hosting account. Creates Linux user, home directory, vhost, DNS zone, and optionally sends a welcome email.
+创建主机账户。创建 Linux 用户、主目录、虚拟主机、DNS 区域，并可选择发送欢迎电子邮件。
 
-**Body:**
+**请求体：**
 
 ```json
 {
@@ -136,41 +136,41 @@ Create a hosting account. Creates Linux user, home directory, vhost, DNS zone, a
 }
 ```
 
-**Access:** Admin, Reseller
+**访问权限：** 管理员、经销商
 
 ### `POST /api/accounts/suspend`
 
-Suspend an account (disables vhost, notifies user).
+暂停账户（禁用虚拟主机，通知用户）。
 
-**Body:** `{id, reason?}`  
-**Access:** Admin, Reseller (own accounts)
+**请求体：** `{id, reason?}`  
+**访问权限：** 管理员、经销商（自己的账户）
 
 ### `POST /api/accounts/unsuspend`
 
-Re-enable a suspended account.
+重新启用已暂停的账户。
 
-**Body:** `{id}`  
-**Access:** Admin, Reseller (own accounts)
+**请求体：** `{id}`  
+**访问权限：** 管理员、经销商（自己的账户）
 
 ### `POST /api/accounts/terminate`
 
-Permanently delete an account and all its data.
+永久删除账户及其所有数据。
 
-**Body:** `{id}`  
-**Access:** Admin only
+**请求体：** `{id}`  
+**访问权限：** 仅管理员
 
 ### `POST /api/accounts/change-password`
 
-Reset an account's panel and system password.
+重置账户的面板密码和系统密码。
 
-**Body:** `{account_id, password}`  
-**Access:** Admin only
+**请求体：** `{account_id, password}`  
+**访问权限：** 仅管理员
 
 ### `GET /api/accounts/usage?id=<id>`
 
-Return disk, email, database, domain, and FTP usage vs. package limits.
+返回磁盘、电子邮件、数据库、域名和 FTP 使用量与套餐限制的对比。
 
-**Access:** Admin, Reseller (own accounts)
+**访问权限：** 管理员、经销商（自己的账户）
 
 ---
 
@@ -178,15 +178,15 @@ Return disk, email, database, domain, and FTP usage vs. package limits.
 
 ### `GET /api/domains/list?account_id=<id>`
 
-List domains for an account.
+列出账户的域名。
 
-**Access:** Admin, Reseller (own accounts), User (own account)
+**访问权限：** 管理员、经销商（自己的账户）、用户（自己的账户）
 
 ### `POST /api/domains/add`
 
-Add a domain, subdomain, or redirect to an account.
+向账户添加域名、子域名或重定向。
 
-**Body:**
+**请求体：**
 
 ```json
 {
@@ -198,18 +198,18 @@ Add a domain, subdomain, or redirect to an account.
 }
 ```
 
-`type` values: `addon`, `subdomain`, `redirect`
+`type` 值：`addon`、`subdomain`、`redirect`
 
-For redirects, include `redirect_to` (URL) and `redirect_code` (301 or 302).
+对于重定向，包含 `redirect_to`（URL）和 `redirect_code`（301 或 302）。
 
-**Access:** Admin, Reseller, User
+**访问权限：** 管理员、经销商、用户
 
 ### `POST /api/domains/remove`
 
-Remove a domain (cannot remove the primary domain).
+移除域名（不能移除主域名）。
 
-**Body:** `{account_id, domain_id}`  
-**Access:** Admin, Reseller, User
+**请求体：** `{account_id, domain_id}`  
+**访问权限：** 管理员、经销商、用户
 
 ---
 
@@ -217,36 +217,36 @@ Remove a domain (cannot remove the primary domain).
 
 ### `GET /api/email/list?account_id=<id>`
 
-List email accounts for an account.
+列出账户的电子邮件账户。
 
-**Access:** Admin, Reseller, User
+**访问权限：** 管理员、经销商、用户
 
 ### `POST /api/email/create`
 
-Create a mailbox.
+创建邮箱。
 
-**Body:** `{account_id, email, password, quota_mb?}`  
-**Access:** Admin, Reseller, User (subject to `max_email` package limit)
+**请求体：** `{account_id, email, password, quota_mb?}`  
+**访问权限：** 管理员、经销商、用户（受 `max_email` 套餐限制约束）
 
 ### `DELETE /api/email/delete`
 
-Delete a mailbox.
+删除邮箱。
 
-**Body:** `{id}`  
-**Access:** Admin, Reseller, User
+**请求体：** `{id}`  
+**访问权限：** 管理员、经销商、用户
 
 ### `POST /api/email/suspend`
 
-Suspend a mailbox.
+暂停邮箱。
 
-**Body:** `{id}`  
-**Access:** Admin, Reseller, User
+**请求体：** `{id}`  
+**访问权限：** 管理员、经销商、用户
 
 ### `GET /api/webmail/login-url?account_id=<id>&email=<email>`
 
-Generate a single-sign-on webmail URL (valid 5 minutes).
+生成单点登录网络邮件 URL（有效期 5 分钟）。
 
-**Access:** Admin, Reseller, User
+**访问权限：** 管理员、经销商、用户
 
 ---
 
@@ -254,19 +254,19 @@ Generate a single-sign-on webmail URL (valid 5 minutes).
 
 ### `GET /api/dns/list?account_id=<id>`
 
-List DNS zones for an account.
+列出账户的 DNS 区域。
 
-**Access:** Admin, Reseller, User
+**访问权限：** 管理员、经销商、用户
 
 ### `GET /api/dns/records?zone_id=<id>`
 
-List records in a zone.
+列出区域中的记录。
 
 ### `POST /api/dns/add-record`
 
-Add a DNS record.
+添加 DNS 记录。
 
-**Body:**
+**请求体：**
 
 ```json
 {
@@ -278,25 +278,25 @@ Add a DNS record.
 }
 ```
 
-**Access:** Admin, Reseller, User
+**访问权限：** 管理员、经销商、用户
 
 ### `POST /api/dns/update-record`
 
-Update an existing record.
+更新现有记录。
 
-**Body:** `{record_id, name, value, ttl}`
+**请求体：** `{record_id, name, value, ttl}`
 
 ### `POST /api/dns/delete-record`
 
-Delete a record.
+删除记录。
 
-**Body:** `{record_id}`
+**请求体：** `{record_id}`
 
 ### `POST /api/dkim/generate`
 
-Generate DKIM key pair for a domain.
+为域名生成 DKIM 密钥对。
 
-**Body:** `{account_id, domain}`
+**请求体：** `{account_id, domain}`
 
 ---
 
@@ -304,22 +304,22 @@ Generate DKIM key pair for a domain.
 
 ### `GET /api/databases/list?account_id=<id>`
 
-List MySQL databases for an account.
+列出账户的 MySQL 数据库。
 
-**Access:** Admin, Reseller, User
+**访问权限：** 管理员、经销商、用户
 
 ### `POST /api/databases/create`
 
-Create a database and MySQL user.
+创建数据库和 MySQL 用户。
 
-**Body:** `{account_id, db_name, db_user, db_pass}`  
-**Subject to `max_databases` package limit.**
+**请求体：** `{account_id, db_name, db_user, db_pass}`  
+**受 `max_databases` 套餐限制约束。**
 
 ### `DELETE /api/databases/delete`
 
-Drop a database.
+删除数据库。
 
-**Body:** `{id}`
+**请求体：** `{id}`
 
 ---
 
@@ -327,20 +327,20 @@ Drop a database.
 
 ### `GET /api/ftp/list?account_id=<id>`
 
-List FTP accounts.
+列出 FTP 账户。
 
 ### `POST /api/ftp/create`
 
-Create an FTP account.
+创建 FTP 账户。
 
-**Body:** `{account_id, username, password, home_dir}`  
-**Subject to `max_ftp` package limit.**
+**请求体：** `{account_id, username, password, home_dir}`  
+**受 `max_ftp` 套餐限制约束。**
 
 ### `DELETE /api/ftp/delete`
 
-Delete an FTP account.
+删除 FTP 账户。
 
-**Body:** `{id}`
+**请求体：** `{id}`
 
 ---
 
@@ -348,67 +348,67 @@ Delete an FTP account.
 
 ### `GET /api/ssl/list?account_id=<id>`
 
-List SSL certificates for an account.
+列出账户的 SSL 证书。
 
 ### `POST /api/ssl/issue`
 
-Issue a Let's Encrypt certificate. The domain must resolve publicly.
+签发 Let's Encrypt 证书。域名必须能够公开解析。
 
-**Body:** `{account_id, domain}`
+**请求体：** `{account_id, domain}`
 
 ### `POST /api/ssl/delete`
 
-Remove an SSL certificate record.
+移除 SSL 证书记录。
 
-**Body:** `{id}`
+**请求体：** `{id}`
 
 ---
 
 ## files
 
-The file manager API mirrors the user-facing file manager. All paths are validated against the account's home directory; paths outside it are rejected.
+文件管理器 API 与面向用户的文件管理器对应。所有路径都会根据账户的主目录进行验证；该目录之外的路径会被拒绝。
 
 ### `GET /api/files/list?account_id=<id>&path=<path>`
 
-List directory contents.
+列出目录内容。
 
 ### `GET /api/files/read?account_id=<id>&path=<path>`
 
-Read a text file (max 1 MB).
+读取文本文件（最大 1 MB）。
 
 ### `POST /api/files/write`
 
-Write/create a file.
+写入/创建文件。
 
-**Body:** `{account_id, path, content}`
+**请求体：** `{account_id, path, content}`
 
 ### `POST /api/files/mkdir`
 
-Create a directory.
+创建目录。
 
-**Body:** `{account_id, path}`
+**请求体：** `{account_id, path}`
 
 ### `DELETE /api/files/delete`
 
-Delete a file or directory.
+删除文件或目录。
 
-**Body:** `{account_id, path}`
+**请求体：** `{account_id, path}`
 
 ### `POST /api/files/rename`
 
-Rename or move a file.
+重命名或移动文件。
 
-**Body:** `{account_id, from, to}`
+**请求体：** `{account_id, from, to}`
 
 ### `POST /api/files/chmod`
 
-Change file permissions (clamped to 0777 max).
+更改文件权限（最大限制为 0777）。
 
-**Body:** `{account_id, path, mode}` (e.g. `"mode": "0755"`)
+**请求体：** `{account_id, path, mode}`（例如 `"mode": "0755"`）
 
 ### `POST /api/files/upload`
 
-Upload a file. Multipart form data: `account_id`, `path`, `file`.
+上传文件。多部分表单数据：`account_id`、`path`、`file`。
 
 ---
 
@@ -416,19 +416,19 @@ Upload a file. Multipart form data: `account_id`, `path`, `file`.
 
 ### `GET /api/cron/list?account_id=<id>`
 
-List cron jobs for an account.
+列出账户的 cron 任务。
 
 ### `POST /api/cron/save`
 
-Create or update a cron job.
+创建或更新 cron 任务。
 
-**Body:** `{account_id, id?, schedule, command, enabled}`
+**请求体：** `{account_id, id?, schedule, command, enabled}`
 
 ### `DELETE /api/cron/delete`
 
-Delete a cron job.
+删除 cron 任务。
 
-**Body:** `{id}`
+**请求体：** `{id}`
 
 ---
 
@@ -436,15 +436,15 @@ Delete a cron job.
 
 ### `GET /api/packages/list`
 
-List all hosting packages.
+列出所有主机套餐。
 
-**Access:** Admin, Reseller
+**访问权限：** 管理员、经销商
 
 ### `POST /api/packages/create`
 
-Create a package.
+创建套餐。
 
-**Body:**
+**请求体：**
 
 ```json
 {
@@ -460,15 +460,15 @@ Create a package.
 
 ### `POST /api/packages/update`
 
-Update a package.
+更新套餐。
 
-**Body:** `{id, ...same fields as create}`
+**请求体：** `{id, ...与创建相同的字段}`
 
 ### `DELETE /api/packages/delete`
 
-Delete a package (accounts using it are unaffected).
+删除套餐（使用它的账户不受影响）。
 
-**Body:** `{id}`
+**请求体：** `{id}`
 
 ---
 
@@ -476,13 +476,13 @@ Delete a package (accounts using it are unaffected).
 
 ### `GET /api/stats/account?account_id=<id>`
 
-Return usage stats for an account. For user role, `account_id` is inferred automatically.
+返回账户的使用统计信息。对于用户角色，`account_id` 会自动推断。
 
 ### `GET /api/stats/server`
 
-Return historical server stats (CPU, RAM, disk) from the last 24 hours. Populated by the `collect-stats.php` cron every 5 minutes.
+返回最近 24 小时的历史服务器统计信息（CPU、内存、磁盘）。由 `collect-stats.php` cron 每 5 分钟填充。
 
-**Access:** Admin only
+**访问权限：** 仅管理员
 
 ---
 
@@ -490,95 +490,95 @@ Return historical server stats (CPU, RAM, disk) from the last 24 hours. Populate
 
 ### `GET /api/sessions/list`
 
-List all active sessions (admin sees all, users see their own).
+列出所有活动会话（管理员看到全部，用户看到自己的）。
 
 ### `DELETE /api/sessions/revoke`
 
-Revoke a specific session.
+撤销特定会话。
 
-**Body:** `{session_id}`  
-**Access:** Admin
+**请求体：** `{session_id}`  
+**访问权限：** 管理员
 
 ### `DELETE /api/sessions/revoke-user`
 
-Revoke all sessions for a specific user.
+撤销特定用户的所有会话。
 
-**Body:** `{user_id}`  
-**Access:** Admin
+**请求体：** `{user_id}`  
+**访问权限：** 管理员
 
 ### `DELETE /api/sessions/revoke-all`
 
-Revoke all active sessions on the panel.
+撤销面板上的所有活动会话。
 
-**Access:** Admin
+**访问权限：** 管理员
 
 ---
 
 ## system
 
-All system actions require Admin unless noted.
+除非另有说明，所有系统操作都需要管理员权限。
 
 ### `GET /api/system/version`
 
-Return panel version, git commit, PHP version, OS. No auth required.
+返回面板版本、git 提交、PHP 版本、操作系统。无需认证。
 
 ### `GET /api/system/stats`
 
-Return live CPU, RAM, disk, uptime, and service status.
+返回实时 CPU、内存、磁盘、运行时间和服务状态。
 
 ### `GET /api/system/check-update`
 
-Check GitHub for newer NovaCPX commits.
+检查 GitHub 上是否有更新的 NovaCPX 提交。
 
 ### `POST /api/system/apply-update`
 
-Pull the latest code and trigger a deploy.
+拉取最新代码并触发部署。
 
 ### `GET /api/system/check-os-update`
 
-List available apt package upgrades.
+列出可用的 apt 软件包升级。
 
 ### `POST /api/system/apply-os-update`
 
-Run `apt-get upgrade` and restart any services that went down.
+运行 `apt-get upgrade` 并重启任何已停止的服务。
 
 ### `GET /api/system/audit-log`
 
-Query the audit log.
+查询审计日志。
 
-**Query params:** `page`, `per_page`, `user`, `action`, `date_from`, `date_to`
+**查询参数：** `page`、`per_page`、`user`、`action`、`date_from`、`date_to`
 
 ### `GET /api/system/server-options`
 
-Return current web/mail/FTP/DNS server selections and detection state.
+返回当前 Web/邮件/FTP/DNS 服务器选择及检测状态。
 
 ### `POST /api/system/save-option`
 
-Save a server option.
+保存服务器选项。
 
-**Body:** `{key, value}` — allowed keys: `web_server`, `mail_server`, `ftp_server`, `dns_server`, `whmcs_api_key`, `whmcs_enabled`, `ns1_hostname`, `ns2_hostname`
+**请求体：** `{key, value}` — 允许的键：`web_server`、`mail_server`、`ftp_server`、`dns_server`、`whmcs_api_key`、`whmcs_enabled`、`ns1_hostname`、`ns2_hostname`
 
 ### `GET /api/system/notify-settings`
 
-Return notification settings (API key masked).
+返回通知设置（API 密钥已掩码）。
 
 ### `POST /api/system/save-notify-settings`
 
-Save notification settings.
+保存通知设置。
 
-**Body:** `{cybermail_api_key?, notify_from_email?, notify_from_name?, notify_admin_email?, notifications_enabled?}`
+**请求体：** `{cybermail_api_key?, notify_from_email?, notify_from_name?, notify_admin_email?, notifications_enabled?}`
 
 ### `POST /api/system/test-notify`
 
-Send a test email.
+发送测试电子邮件。
 
-**Body:** `{to}`
+**请求体：** `{to}`
 
 ### `POST /api/system/service-action`
 
-Start, stop, or restart a system service.
+启动、停止或重启系统服务。
 
-**Body:** `{service, action}` — action: `start`, `stop`, `restart`
+**请求体：** `{service, action}` — action：`start`、`stop`、`restart`
 
 ---
 
@@ -586,64 +586,64 @@ Start, stop, or restart a system service.
 
 ### `GET /api/branding/get`
 
-Return the branding settings for the current reseller.
+返回当前经销商的白标设置。
 
-**Access:** Reseller (own branding), Admin (pass `reseller_id` param)
+**访问权限：** 经销商（自己的白标）、管理员（传入 `reseller_id` 参数）
 
 ### `POST /api/branding/save`
 
-Save branding settings.
+保存白标设置。
 
-**Body:** `{panel_name?, primary_color?, accent_color?, support_email?, support_url?, hide_powered_by?, custom_css?}`
+**请求体：** `{panel_name?, primary_color?, accent_color?, support_email?, support_url?, hide_powered_by?, custom_css?}`
 
 ### `POST /api/branding/upload-logo`
 
-Upload a logo image. Multipart: `logo` file field.  
-Accepts PNG, JPG, SVG, WEBP (max 512 KB).
+上传 Logo 图片。多部分：`logo` 文件字段。  
+接受 PNG、JPG、SVG、WEBP（最大 512 KB）。
 
 ### `POST /api/branding/delete-logo`
 
-Remove the current logo and revert to the default SVG.
+移除当前 Logo 并恢复为默认 SVG。
 
 ---
 
 ## whmcs
 
-WHMCS billing bridge. Authenticate with `X-WHMCS-Key: <key>` header (configured in Server Options).
+WHMCS 计费桥接。使用 `X-WHMCS-Key: <key>` 请求头进行认证（在服务器选项中配置）。
 
 ### `POST /api/whmcs/create`
 
-Provision a new hosting account.
+开通新的主机账户。
 
-**Body:** `{domain, username, password, email, package_id?}`
+**请求体：** `{domain, username, password, email, package_id?}`
 
 ### `POST /api/whmcs/suspend`
 
-Suspend an account by domain.
+按域名暂停账户。
 
-**Body:** `{domain, reason?}`
+**请求体：** `{domain, reason?}`
 
 ### `POST /api/whmcs/unsuspend`
 
-Unsuspend an account by domain.
+按域名恢复账户。
 
-**Body:** `{domain}`
+**请求体：** `{domain}`
 
 ### `POST /api/whmcs/terminate`
 
-Terminate an account by domain.
+按域名终止账户。
 
-**Body:** `{domain}`
+**请求体：** `{domain}`
 
 ### `POST /api/whmcs/changepackage`
 
-Switch an account to a different package.
+将账户切换到不同的套餐。
 
-**Body:** `{domain, package_id}`
+**请求体：** `{domain, package_id}`
 
 ### `GET /api/whmcs/info?domain=<domain>`
 
-Return account details for a domain.
+返回域名的账户详情。
 
 ---
 
@@ -651,46 +651,46 @@ Return account details for a domain.
 
 ### `GET /api/docker/status`
 
-Engine status and container/image counts.
+引擎状态及容器/镜像数量。
 
 ### `GET /api/docker/containers?account_id=<id>`
 
-List containers for an account (or all containers for admin with no account_id).
+列出账户的容器（管理员不传 account_id 时列出所有容器）。
 
 ### `POST /api/docker/container-action`
 
-**Body:** `{container_id, action}` — action: `start`, `stop`, `restart`, `remove`
+**请求体：** `{container_id, action}` — action：`start`、`stop`、`restart`、`remove`
 
 ### `GET /api/docker/logs?container_id=<id>`
 
-Return the last 100 log lines from a container.
+返回容器的最后 100 行日志。
 
 ### `GET /api/docker/images`
 
-List pulled images.
+列出已拉取的镜像。
 
 ### `POST /api/docker/pull`
 
-Pull an image.
+拉取镜像。
 
-**Body:** `{image}` e.g. `"image": "nginx:latest"`
+**请求体：** `{image}` 例如 `"image": "nginx:latest"`
 
 ### `POST /api/docker/run`
 
-Run a new container.
+运行新容器。
 
-**Body:** `{account_id, name, image, ports?, env?, volumes?}`  
-Container names are namespaced as `novacpx-<username>-<name>`.
+**请求体：** `{account_id, name, image, ports?, env?, volumes?}`  
+容器名称命名空间为 `novacpx-<username>-<name>`。
 
 ### `GET /api/docker/catalog`
 
-Return the one-click app catalog (9 apps: WordPress, Ghost, Nextcloud, Gitea, Matomo, Vaultwarden, Node.js, Flask, static).
+返回一键应用目录（9 个应用：WordPress、Ghost、Nextcloud、Gitea、Matomo、Vaultwarden、Node.js、Flask、static）。
 
 ### `POST /api/docker/launch-app`
 
-Deploy an app from the catalog.
+从目录部署应用。
 
-**Body:** `{account_id, app_id, ...app-specific config}`
+**请求体：** `{account_id, app_id, ...应用特定配置}`
 
 ---
 
@@ -698,28 +698,28 @@ Deploy an app from the catalog.
 
 ### `GET /api/firewall/rules`
 
-List UFW rules.
+列出 UFW 规则。
 
-**Access:** Admin
+**访问权限：** 管理员
 
 ### `POST /api/firewall/add-rule`
 
-Add a UFW rule.
+添加 UFW 规则。
 
-**Body:** `{port, protocol, action, from_ip?}`
+**请求体：** `{port, protocol, action, from_ip?}`
 
 ### `POST /api/firewall/delete-rule`
 
-Remove a rule by number.
+按编号移除规则。
 
-**Body:** `{rule_number}`
+**请求体：** `{rule_number}`
 
 ### `GET /api/firewall/fail2ban`
 
-Return Fail2Ban jail status and banned IPs.
+返回 Fail2Ban jail 状态和被封禁的 IP。
 
 ### `POST /api/firewall/unban`
 
-Unban an IP from a jail.
+从 jail 中解封 IP。
 
-**Body:** `{jail, ip}`
+**请求体：** `{jail, ip}`
