@@ -30,7 +30,7 @@ info() { echo -e "${BLUE}[→]${NC} $*" | tee -a "$LOG"; }
 step() { echo -e "\n${BOLD}━━━ $* ━━━${NC}" | tee -a "$LOG"; }
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
-WEB_SERVER="apache"
+WEB_SERVER="nginx"
 INSTALL_MYSQL=true
 INSTALL_POSTGRES=true
 
@@ -84,11 +84,11 @@ case "$OS_ID" in
     ;;
   debian)
     case "$OS_VER" in
-      11|12|13) log "Detected: Debian $OS_VER ($OS_CODENAME)" ;;
-      *) fail "Debian $OS_VER not supported. Use Debian 11 (Bullseye) or 12 (Bookworm) and 13 (trixie)." ;;
+      11|12) log "Detected: Debian $OS_VER ($OS_CODENAME)" ;;
+      *) fail "Debian $OS_VER not supported. Use Debian 11 (Bullseye) or 12 (Bookworm)." ;;
     esac
     ;;
-  *) fail "Unsupported OS: $OS_ID. NovaCPX supports Ubuntu 20/22/24 and Debian 11/12/13." ;;
+  *) fail "Unsupported OS: $OS_ID. NovaCPX supports Ubuntu 20/22/24 and Debian 11/12." ;;
 esac
 
 log "Web server: $WEB_SERVER"
@@ -150,7 +150,7 @@ fi
 
 apt-get update -qq >> "$LOG" 2>&1
 
-PHP_VERSIONS=("7.4" "8.1" "8.2" "8.3" "8.4" "8.5")
+PHP_VERSIONS=("7.4" "8.1" "8.2" "8.3")
 PHP_EXTENSIONS="cli fpm common mysql pgsql sqlite3 gd curl mbstring xml zip bcmath intl soap redis imagick opcache"
 
 for VER in "${PHP_VERSIONS[@]}"; do
