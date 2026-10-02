@@ -52,6 +52,8 @@
  *   proxy_remote_pass   — SSH password
  *   proxy_backend_ip    — IP of NovaCPX Apache (used when syncing proxy hosts)
  */
+require_once __DIR__ . '/Root.php';
+
 class ProxyManager {
 
     private static string $confDir    = '/etc/nginx/sites-available';
@@ -226,8 +228,8 @@ class ProxyManager {
                     escapeshellarg(self::$enabledDir . '/' . self::$confPrefix . $safe . '.conf')
                 );
             } else {
-                @unlink(self::$confDir    . '/' . self::$confPrefix . $safe . '.conf');
-                @unlink(self::$enabledDir . '/' . self::$confPrefix . $safe . '.conf');
+                self::writeAllConfigs();   // regenerates the proxy hosts without this one and reloads nginx
+                return;
             }
         }
         self::reload();
@@ -256,8 +258,16 @@ class ProxyManager {
             self::remoteExec('rm -f ' . self::$confDir . '/' . self::$confPrefix . '*.conf ' .
                 self::$enabledDir . '/' . self::$confPrefix . '*.conf');
         } else {
-            foreach (glob(self::$confDir    . '/' . self::$confPrefix . '*.conf') ?: [] as $f) @unlink($f);
-            foreach (glob(self::$enabledDir . '/' . self::$confPrefix . '*.conf') ?: [] as $f) @unlink($f);
+            // Local nginx: the privileged helper generates every proxy vhost from these fields (it never takes nginx text).
+            // Hand-written custom_config is not supported in local mode; those hosts get the standard generated config.
+            $list = [];
+            foreach ($hosts as $host) {
+                if (!$host['enabled']) continue;
+                $list[] = ['domain' => strtolower($host['domain']), 'upstream' => $host['upstream'], 'ssl_enabled' => !empty($host['ssl_enabled'])];
+            }
+            $r = Root::run('proxy.sync', ['hosts' => $list]);
+            if ($r['rc'] !== 0) novacpx_log('warn', 'Proxy sync failed: ' . trim($r['out']));
+            return;
         }
 
         foreach ($hosts as $host) {
@@ -478,9 +488,8 @@ class ProxyManager {
             self::remoteExec('nginx -t 2>/dev/null && systemctl reload nginx 2>/dev/null || true');
             return 'proxy configs removed from remote VM';
         }
-        // Local uninstall
-        foreach (glob(self::$confDir    . '/' . self::$confPrefix . '*.conf') ?: [] as $f) @unlink($f);
-        foreach (glob(self::$enabledDir . '/' . self::$confPrefix . '*.conf') ?: [] as $f) @unlink($f);
+        // Local uninstall: an empty host list removes every generated proxy vhost
+        Root::run('proxy.sync', ['hosts' => []]);
         if ($removeNginx) {
             shell_exec('systemctl stop nginx 2>/dev/null; apt-get remove -y nginx nginx-common 2>/dev/null');
             return 'nginx removed';

@@ -47,7 +47,7 @@ match ($action) {
         $stacks = $db->fetchAll("SELECT * FROM docker_compose_stacks WHERE account_id = ?", [$accountId]);
         foreach ($stacks as $stack) {
             if (is_dir($stack['stack_dir']) && file_exists("{$stack['stack_dir']}/docker-compose.yml")) {
-                shell_exec("sudo docker compose " . DockerManager::composeArgs($stack) . " down -v 2>/dev/null");
+                Root::run('docker.compose', ['dir' => $stack['stack_dir'], 'action' => 'down-v', 'quota' => ['max_containers' => 50, 'max_memory_mb' => 65536, 'max_cpus' => 32]]);
             }
             $db->execute("DELETE FROM docker_compose_stacks WHERE id = ?", [$stack['id']]);
         }
@@ -56,7 +56,7 @@ match ($action) {
         $containers = $db->fetchAll("SELECT container_id FROM docker_containers WHERE account_id = ?", [$accountId]);
         foreach ($containers as $c) {
             if ($c['container_id']) {
-                shell_exec("sudo docker rm -f " . escapeshellarg($c['container_id']) . " 2>/dev/null");
+                Root::run('docker.rm', ['id' => $c['container_id'], 'force' => true]);
             }
         }
         $db->execute("DELETE FROM docker_containers WHERE account_id = ?", [$accountId]);

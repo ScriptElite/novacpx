@@ -4,6 +4,7 @@
  * Admin-only actions gated with Auth::require('admin')
  */
 
+require_once NOVACPX_LIB . '/Root.php';
 Auth::getInstance()->require('admin', 'reseller', 'user');
 $db   = DB::getInstance();
 $body = json_decode(file_get_contents('php://input'), true) ?? [];
@@ -154,11 +155,9 @@ echo "[\$(ts)] Preparing backup..."
 mkdir -p {$backupDir}
 cp -a {$webRoot} {$backupDir}/public 2>/dev/null
 echo "[\$(ts)] Updating package lists..."
-sudo apt-get update -q
+printf '%s' '{"op":"update"}' | sudo -n /usr/local/sbin/novacpx-root pkg.apt
 echo "[\$(ts)] Running upgrade (non-interactive)..."
-DEBIAN_FRONTEND=noninteractive sudo apt-get upgrade -y \
-  -o Dpkg::Options::="--force-confdef" \
-  -o Dpkg::Options::="--force-confold"
+printf '%s' '{"op":"upgrade"}' | sudo -n /usr/local/sbin/novacpx-root pkg.apt
 UPGRADE_EXIT=\$?
 echo "[\$(ts)] Checking services..."
 for SVC in {$webSvc} mysql postfix dovecot; do
@@ -633,7 +632,7 @@ BASH;
                 $installed = trim(shell_exec("dpkg -l rspamd 2>/dev/null | grep -c '^ii'") ?: '0');
                 if ($installed === '0') {
                     $sse("  Installing Rspamd (this may take 1–2 minutes)…\n");
-                    $run("sudo apt-get install -y rspamd 2>&1");
+                    $run(Root::shellCommand('pkg.apt', ['op' => 'install', 'packages' => ['rspamd']]) . ' 2>&1');
                 }
                 $sse("  Enabling Rspamd…\n");
                 $run("sudo systemctl enable rspamd 2>&1 && sudo systemctl start rspamd 2>&1");
@@ -656,7 +655,7 @@ BASH;
             $installed = trim(shell_exec("dpkg -l $startSvc 2>/dev/null | grep -c '^ii'") ?: '0');
             if ($installed === '0') {
                 $sse("  Installing {$startSvc}…\n");
-                $run("sudo apt-get install -y $startSvc 2>&1");
+                $run(Root::shellCommand('pkg.apt', ['op' => 'install', 'packages' => [$startSvc]]) . ' 2>&1');
             }
             $sse("  Starting {$startSvc}…\n");
             $run("sudo systemctl enable $startSvc 2>&1 && sudo systemctl start $startSvc 2>&1");
@@ -672,7 +671,7 @@ BASH;
                 $installed = trim(shell_exec("dpkg -l $startSvc 2>/dev/null | grep -c '^ii'") ?: '0');
                 if ($installed === '0') {
                     $sse("  Installing {$startSvc}…\n");
-                    $run("sudo apt-get install -y $startSvc 2>&1");
+                    $run(Root::shellCommand('pkg.apt', ['op' => 'install', 'packages' => [$startSvc]]) . ' 2>&1');
                 }
                 $sse("  Starting {$startSvc}…\n");
                 $run("sudo systemctl enable $startSvc 2>&1 && sudo systemctl start $startSvc 2>&1");

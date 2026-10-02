@@ -2,6 +2,8 @@
 /**
  * DockerManager — Docker Engine install, container lifecycle, compose stacks, app catalog
  */
+require_once __DIR__ . '/Root.php';
+
 class DockerManager {
 
     private DB $db;
@@ -19,51 +21,27 @@ class DockerManager {
 
     public function install(): string {
         if ($this->isInstalled()) return 'Docker is already installed';
-        // Write install script to /tmp then run it via sudo bash (no interactive terminal needed)
-        $script = <<<'SH'
-#!/bin/bash
-set -e
-export DEBIAN_FRONTEND=noninteractive
-curl -fsSL https://get.docker.com -o /tmp/ncpx-get-docker.sh
-bash /tmp/ncpx-get-docker.sh
-rm -f /tmp/ncpx-get-docker.sh
-systemctl enable --now docker
-usermod -aG docker www-data
-SH;
-        $scriptFile = '/tmp/ncpx-docker-install.sh';
-        file_put_contents($scriptFile, $script);
-        chmod($scriptFile, 0700);
-        $out = [];
-        exec('sudo bash ' . escapeshellarg($scriptFile) . ' 2>&1', $out, $rc);
-        @unlink($scriptFile);
-        if ($rc !== 0) throw new RuntimeException("Docker install failed: " . implode("\n", $out));
+        $r = Root::run('docker.install');
+        if ($r['rc'] !== 0) throw new RuntimeException("Docker install failed: " . $r['out']);
         novacpx_log('info', 'DockerManager: Docker CE installed');
         return 'Docker installed successfully';
     }
 
     public function engineStatus(): array {
         if (!$this->isInstalled()) return ['installed' => false];
-        $version = trim(shell_exec('sudo docker version --format "{{.Server.Version}}" 2>/dev/null') ?? '');
-        $running = !empty($version);
-        $df = [];
-        if ($running) {
-            $raw = shell_exec('sudo docker system df --format json 2>/dev/null') ?? '';
-            foreach (explode("\n", trim($raw)) as $line) {
-                $obj = json_decode($line, true);
-                if ($obj) $df[] = $obj;
-            }
-        }
+        $st      = Root::run('docker.status');
+        $info    = $st['rc'] === 0 ? (json_decode($st['out'], true) ?: []) : [];
+        $version = (string)($info['version'] ?? '');
         return [
             'installed' => true,
-            'running'   => $running,
+            'running'   => $version !== '',
             'version'   => $version,
-            'disk'      => $df,
+            'disk'      => $info['disk'] ?? [],
         ];
     }
 
     public function systemPrune(bool $volumes = false): string {
-        $flag = $volumes ? '--volumes' : '';
-        $out = shell_exec("sudo docker system prune -f {$flag} 2>&1") ?? '';
+        $out = Root::run('docker.prune', ['volumes' => $volumes])['out'];
         novacpx_log('info', 'DockerManager: system prune');
         return trim($out);
     }
@@ -76,14 +54,15 @@ SH;
         if ($accountId) { $query .= " WHERE account_id = ?"; $params[] = $accountId; }
         $query .= " ORDER BY created_at DESC";
         $rows = $this->db->fetchAll($query, $params);
-        // Sync live status from docker daemon
+        // Sync live status from docker daemon (one helper call for all containers)
+        $ids = array_values(array_filter(array_column($rows, 'container_id')));
+        $live = [];
+        if ($ids) { $r = Root::run('docker.states', ['ids' => $ids]); $live = $r['rc'] === 0 ? (json_decode($r['out'], true) ?: []) : []; }
         foreach ($rows as &$row) {
-            if ($row['container_id']) {
-                $st = trim(shell_exec("sudo docker inspect --format='{{.State.Status}}' " . escapeshellarg($row['container_id']) . " 2>/dev/null") ?? '');
-                if ($st && $row['status'] !== $st) {
-                    $this->db->execute("UPDATE docker_containers SET status=? WHERE id=?", [$st, $row['id']]);
-                    $row['status'] = $st;
-                }
+            $st = $live[$row['container_id']] ?? '';
+            if ($st && $row['status'] !== $st) {
+                $this->db->execute("UPDATE docker_containers SET status=? WHERE id=?", [$st, $row['id']]);
+                $row['status'] = $st;
             }
         }
         return $rows;
@@ -93,7 +72,7 @@ SH;
         $this->validateContainerId($containerId);
         $allowed = ['start','stop','restart','pause','unpause','kill'];
         if (!in_array($action, $allowed)) throw new RuntimeException("Invalid action: $action");
-        $out = shell_exec("sudo docker {$action} " . escapeshellarg($containerId) . " 2>&1") ?? '';
+        $out = Root::run('docker.action', ['id' => $containerId, 'action' => $action])['out'];
         $status = match($action) {
             'start','restart','unpause' => 'running',
             'stop','pause','kill'       => 'stopped',
@@ -105,19 +84,18 @@ SH;
 
     public function removeContainer(string $containerId, bool $force = false): void {
         $this->validateContainerId($containerId);
-        $flag = $force ? '-f' : '';
-        shell_exec("sudo docker rm {$flag} " . escapeshellarg($containerId) . " 2>&1");
+        Root::run('docker.rm', ['id' => $containerId, 'force' => $force]);
         $this->db->execute("DELETE FROM docker_containers WHERE container_id=?", [$containerId]);
     }
 
     public function containerLogs(string $containerId, int $lines = 100): string {
         $this->validateContainerId($containerId);
-        return shell_exec("sudo docker logs --tail=" . (int)$lines . " " . escapeshellarg($containerId) . " 2>&1") ?? '';
+        return Root::run('docker.logs', ['id' => $containerId, 'lines' => max(1, min(2000, (int)$lines))])['out'];
     }
 
     public function containerInspect(string $containerId): array {
         $this->validateContainerId($containerId);
-        $json = shell_exec("sudo docker inspect " . escapeshellarg($containerId) . " 2>&1") ?? '';
+        $json = Root::run('docker.inspect', ['id' => $containerId])['out'];
         $data = json_decode($json, true);
         return is_array($data) ? ($data[0] ?? []) : [];
     }
@@ -137,30 +115,21 @@ SH;
         $image  = $this->yqImage($image);
         $safeName = 'novacpx-' . $account['username'] . '-' . preg_replace('/[^a-z0-9_-]/', '', strtolower($name));
 
-        $portArgs = '';
-        if (!empty($opts['ports'])) {
-            foreach ((array)$opts['ports'] as $p) {
-                if (!is_string($p) || !preg_match('/^(\d{1,5}):(\d{1,5})$/', $p, $pm)) continue;
-                if ((int)$pm[1] < self::STACK_PORT_MIN || (int)$pm[1] > self::STACK_PORT_MAX || (int)$pm[2] < 1 || (int)$pm[2] > 65535) {
-                    throw new RuntimeException("Published port {$pm[1]} must be between " . self::STACK_PORT_MIN . " and " . self::STACK_PORT_MAX);
-                }
-                $portArgs .= " -p " . escapeshellarg($p);
+        $ports = [];
+        foreach ((array)($opts['ports'] ?? []) as $p) {
+            if (!is_string($p) || !preg_match('/^(\d{1,5}):(\d{1,5})$/', $p, $pm)) continue;
+            if ((int)$pm[1] < self::STACK_PORT_MIN || (int)$pm[1] > self::STACK_PORT_MAX || (int)$pm[2] < 1 || (int)$pm[2] > 65535) {
+                throw new RuntimeException("Published port {$pm[1]} must be between " . self::STACK_PORT_MIN . " and " . self::STACK_PORT_MAX);
             }
+            $ports[] = $p;
         }
-        $envArgs = '';
-        if (!empty($opts['env'])) {
-            foreach ((array)$opts['env'] as $k => $v) {
-                if (preg_match('/^[A-Z_][A-Z0-9_]*$/', $k)) $envArgs .= " -e " . escapeshellarg("{$k}={$v}");
-            }
+        $env = [];
+        foreach ((array)($opts['env'] ?? []) as $k => $v) {
+            if (preg_match('/^[A-Z_][A-Z0-9_]*$/', (string)$k)) $env[(string)$k] = (string)$v;
         }
 
-        $cmd = "sudo docker run -d --name " . escapeshellarg($safeName)
-             . " --memory={$memMb}m --cpus={$cpus} --pids-limit=512 --security-opt=no-new-privileges:true"
-             . " --restart=unless-stopped"
-             . $portArgs . $envArgs
-             . " " . escapeshellarg($image) . " 2>&1";
-
-        $out = shell_exec($cmd) ?? '';
+        // The helper re-validates everything (name pattern, image, limits, port range) and adds the fixed hardening flags.
+        $out = Root::run('docker.run', ['name' => $safeName, 'image' => $image, 'memory_mb' => $memMb, 'cpus' => $cpus, 'ports' => $ports, 'env' => $env])['out'];
         $cid = trim($out);
 
         if (strlen($cid) !== 64 || !ctype_xdigit($cid)) {
@@ -177,26 +146,29 @@ SH;
 
     // ── Images ────────────────────────────────────────────────────────────────
 
-    public function listImages(): array {
-        $out = shell_exec("sudo docker images --format '{{json .}}' 2>/dev/null") ?? '';
-        $images = [];
+    private function jsonLines(string $out): array {
+        $rows = [];
         foreach (explode("\n", trim($out)) as $line) {
             $obj = json_decode($line, true);
-            if ($obj) $images[] = $obj;
+            if ($obj) $rows[] = $obj;
         }
-        return $images;
+        return $rows;
+    }
+
+    public function listImages(): array {
+        return $this->jsonLines(Root::run('docker.list', ['what' => 'images'])['out']);
     }
 
     public function pullImage(string $image): string {
         if (!preg_match('/^[a-zA-Z0-9._\-\/:@]+$/', $image)) throw new RuntimeException("Invalid image name");
-        $out = shell_exec("sudo docker pull " . escapeshellarg($image) . " 2>&1") ?? '';
+        $out = Root::run('docker.pull', ['image' => $image])['out'];
         novacpx_log('info', "DockerManager: pulled image {$image}");
         return trim($out);
     }
 
     public function removeImage(string $imageId): string {
         if (!preg_match('/^[a-zA-Z0-9:._\-\/]+$/', $imageId)) throw new RuntimeException("Invalid image ID");
-        $out = trim(shell_exec("sudo docker rmi " . escapeshellarg($imageId) . " 2>&1") ?? '');
+        $out = trim(Root::run('docker.rmi', ['image' => $imageId])['out']);
         if (stripos($out, "Error") !== false || stripos($out, "conflict") !== false) {
             throw new \RuntimeException($out);
         }
@@ -206,26 +178,23 @@ SH;
     // ── Volumes & Networks ────────────────────────────────────────────────────
 
     public function listVolumes(): array {
-        $out = shell_exec("sudo docker volume ls --format '{{json .}}' 2>/dev/null") ?? '';
-        $vols = [];
-        foreach (explode("\n", trim($out)) as $line) {
-            $obj = json_decode($line, true);
-            if ($obj) $vols[] = $obj;
-        }
-        return $vols;
+        return $this->jsonLines(Root::run('docker.list', ['what' => 'volumes'])['out']);
     }
 
     public function listNetworks(): array {
-        $out = shell_exec("sudo docker network ls --format '{{json .}}' 2>/dev/null") ?? '';
-        $nets = [];
-        foreach (explode("\n", trim($out)) as $line) {
-            $obj = json_decode($line, true);
-            if ($obj) $nets[] = $obj;
-        }
-        return $nets;
+        return $this->jsonLines(Root::run('docker.list', ['what' => 'networks'])['out']);
     }
 
     // ── Compose Stacks ────────────────────────────────────────────────────────
+
+    /** Quota the helper applies when it checks a stack (customers: their own; admin stacks: generous defaults). */
+    private function stackQuota(?int $accountId): array {
+        if ($accountId) {
+            $account = $this->db->fetchOne("SELECT u.id AS user_id FROM accounts a JOIN users u ON u.id=a.user_id WHERE a.id=?", [$accountId]);
+            if ($account) return $this->getQuota((int)$account['user_id']);
+        }
+        return ['max_containers' => 50, 'max_memory_mb' => 65536, 'max_cpus' => 32.0];
+    }
 
     public function composeAction(int $stackId, string $action): string {
         $stack = $this->db->fetchOne("SELECT * FROM docker_compose_stacks WHERE id=?", [$stackId]);
@@ -236,49 +205,36 @@ SH;
         $allowed = ['up','down','pull','logs'];
         if (!in_array($action, $allowed)) throw new RuntimeException("Invalid action");
 
-        // Customer stacks are re-checked every time they are started or pulled (down/logs always work so a refused stack can be torn down).
-        if ($stack['account_id'] && in_array($action, ['up', 'pull'], true) && !is_file("{$dir}/.novacpx-trusted")) {
-            $this->enforceStackPolicy((int)$stack['account_id'], $dir);
-        }
-        $args = self::composeArgs($stack);
-
-        $cmd = match($action) {
-            'up'   => "sudo docker compose {$args} up -d 2>&1",
-            'down' => "sudo docker compose {$args} down 2>&1",
-            'pull' => "sudo docker compose {$args} pull 2>&1",
-            'logs' => "sudo docker compose {$args} logs --tail=100 2>&1",
-        };
-        $out = shell_exec($cmd) ?? '';
+        // The helper copies the compose file, re-checks it against the stack policy on every up/pull, and runs docker.
+        $r = Root::run('docker.compose', ['dir' => $dir, 'action' => $action, 'quota' => $this->stackQuota($stack['account_id'] ? (int)$stack['account_id'] : null)]);
+        if ($r['rc'] === 64 && in_array($action, ['up', 'pull'], true)) throw new RuntimeException(preg_replace('/^novacpx-root: refused: /', '', trim($r['out'])));
         $status = match($action) { 'up' => 'running', 'down' => 'stopped', default => $stack['status'] };
         $this->db->execute("UPDATE docker_compose_stacks SET status=? WHERE id=?", [$status, $stackId]);
-        return trim($out);
+        return trim($r['out']);
     }
 
     public function createStack(?int $accountId, string $name, string $composeYaml, bool $trusted = false): array {
         $safeName = preg_replace('/[^a-z0-9_-]/', '', strtolower($name));
-        $dir = "{$this->appsDir}/" . ($accountId ? "account-{$accountId}" : 'admin') . "/{$safeName}";
-        if (!is_dir($dir)) {
-            shell_exec('sudo mkdir -p ' . escapeshellarg($dir) . ' 2>/dev/null');
-            shell_exec('sudo chown www-data:www-data ' . escapeshellarg($dir) . ' 2>/dev/null');
-            shell_exec('sudo chmod 750 ' . escapeshellarg($dir) . ' 2>/dev/null');
+        // Administrator-trusted stacks for a customer account live in the admin area (the helper only relaxes the
+        // customer policy there, and only when root has created /etc/novacpx/allow-unrestricted-stacks).
+        if ($accountId && $trusted) {
+            $dir = "{$this->appsDir}/admin/a{$accountId}-{$safeName}";
+        } else {
+            $dir = "{$this->appsDir}/" . ($accountId ? "account-{$accountId}" : 'admin') . "/{$safeName}";
         }
+        if (!is_dir($dir)) Root::ok('docker.stack.prepare', ['dir' => $dir]);
         if (!is_dir($dir)) throw new RuntimeException("Failed to create stack directory: {$dir}");
         if ($accountId && (is_file("{$dir}/docker-compose.yml") || $this->db->fetchOne("SELECT id FROM docker_compose_stacks WHERE account_id=? AND name=?", [$accountId, $safeName]))) {
             throw new RuntimeException("A stack named '{$safeName}' already exists for this account");
         }
         file_put_contents("{$dir}/docker-compose.yml", $composeYaml);
-        if ($accountId && $trusted) {
-            file_put_contents("{$dir}/.novacpx-trusted", "created by an administrator\n");   // admin decision: not restricted
-            file_put_contents("{$dir}/.novacpx-project", "novacpx-a{$accountId}-{$safeName}");
-        } elseif ($accountId) {
-            try {
-                $this->enforceStackPolicy((int)$accountId, $dir);
-            } catch (RuntimeException $e) {
-                @unlink("{$dir}/docker-compose.yml"); @unlink("{$dir}/docker-compose.novacpx-limits.yml"); @rmdir($dir);
-                throw $e;
-            }
-            // Own compose project per tenant+stack, so two customers can never share networks or volumes by picking the same stack name.
-            file_put_contents("{$dir}/.novacpx-project", "novacpx-a{$accountId}-{$safeName}");
+        // Every stack is checked by the helper (it writes the limits file for restricted stacks).
+        try {
+            Root::json('docker.stack.check', ['dir' => $dir, 'quota' => $this->stackQuota($accountId)]);
+        } catch (RuntimeException $e) {
+            @unlink("{$dir}/docker-compose.yml"); @unlink("{$dir}/docker-compose.novacpx-limits.yml"); @rmdir($dir);
+            throw new RuntimeException(preg_replace('/^novacpx-root: refused: /', '', $e->getMessage())
+                . (str_contains($e->getMessage(), 'is not allowed') && $trusted ? ' (unrestricted administrator stacks need /etc/novacpx/allow-unrestricted-stacks, created as root)' : ''));
         }
         $id = (int)$this->db->insert(
             "INSERT INTO docker_compose_stacks (account_id, name, stack_dir, compose_file, status) VALUES (?,?,?,?,'pending')",
@@ -302,17 +258,15 @@ SH;
         // Bring down first
         $dir = $stack['stack_dir'];
         if (is_dir($dir) && is_file("{$dir}/docker-compose.yml")) {
-            shell_exec("sudo docker compose " . self::composeArgs($stack) . " down 2>&1");
+            Root::run('docker.compose', ['dir' => $dir, 'action' => 'down', 'quota' => $this->stackQuota($stack['account_id'] ? (int)$stack['account_id'] : null)]);
         }
         $this->db->execute("DELETE FROM docker_compose_stacks WHERE id=?", [$stackId]);
     }
 
     // ── Customer stack policy ─────────────────────────────────────────────────
-    // Anything an account holder deploys (their own compose file, or a catalog app launched for their account)
-    // runs as root through `sudo docker compose`, so it is checked against an allow-list before every up/pull:
-    // no privileged/host namespaces/devices/capabilities, no bind mounts outside the stack folder, no docker.sock,
-    // no host networking, no external networks/volumes, published ports only in 10000-60000, no file includes.
-    // Admin-owned stacks (account_id NULL) are not restricted.
+    // The policy (no privileged/host namespaces/devices/capabilities, no bind mounts outside the stack folder, no docker.sock,
+    // no host networking, no external networks/volumes, published ports only in 10000-60000, no file includes) is enforced by
+    // the privileged helper (deploy/novacpx-root: ncr_stack_policy) on a root-owned copy of the compose file on every up/pull.
 
     public const STACK_PORT_MIN = 10000;
     public const STACK_PORT_MAX = 60000;
@@ -331,117 +285,6 @@ SH;
     private function yqImage(string $image): string {
         if (!preg_match('~^[A-Za-z0-9][A-Za-z0-9._\-/:@]{0,200}$~', $image)) throw new RuntimeException("Invalid image name");
         return $image;
-    }
-
-    /** -f/-p arguments for a stack: its compose file, the server-written limits file (customer stacks) and a tenant-unique project name (new stacks). */
-    public static function composeArgs(array $stack): string {
-        $dir  = $stack['stack_dir'];
-        $args = '-f ' . escapeshellarg("{$dir}/docker-compose.yml");
-        if (is_file("{$dir}/docker-compose.novacpx-limits.yml")) $args .= ' -f ' . escapeshellarg("{$dir}/docker-compose.novacpx-limits.yml");
-        if (is_file("{$dir}/.novacpx-project")) {
-            $p = preg_replace('/[^a-z0-9_-]/', '', strtolower(trim((string)file_get_contents("{$dir}/.novacpx-project"))));
-            if ($p !== '') $args .= ' -p ' . escapeshellarg($p);
-        }
-        return $args;
-    }
-
-    /**
-     * Pure policy check. Returns ['services' => [names], 'limits' => [name => [...]]] or throws RuntimeException with a
-     * message safe to show the customer. $composeFile must be an existing file; docker is only asked to normalise it.
-     */
-    public static function checkStackPolicy(string $composeFile, string $stackDir, array $quota): array {
-        $yaml = (string)file_get_contents($composeFile);
-        if ($yaml === '' || strlen($yaml) > 65536) throw new RuntimeException('Compose file is empty or larger than 64 KB');
-        // Refused on the raw text, before docker parses (and could read) anything.
-        if (preg_match('/(^|[\s{,\[\'"-])(include|extends|env_file|secrets|configs|build|volumes_from|external_links|cgroup_parent|develop|provider)[\'"]?\s*:/im', $yaml, $m)) {
-            throw new RuntimeException("'{$m[2]}' is not allowed in customer compose files");
-        }
-        if (preg_match('/(?<!\$)(?:\$\$)*\$(?!\$)/', $yaml)) {
-            throw new RuntimeException('Variable substitution ($VAR / ${VAR}) is not allowed; write $$ for a literal $');
-        }
-
-        $proc = proc_open(['sudo', 'docker', 'compose', '-f', $composeFile, 'config', '--format', 'json'],
-                          [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
-        $out = $err = '';
-        if (is_resource($proc)) {
-            $out = (string)stream_get_contents($pipes[1]); $err = (string)stream_get_contents($pipes[2]);
-            fclose($pipes[1]); fclose($pipes[2]); proc_close($proc);
-        }
-        $cfg = json_decode($out, true);
-        if (!is_array($cfg)) $out = $err;
-        if (!is_array($cfg) || !isset($cfg['services']) || !is_array($cfg['services']) || !$cfg['services']) {
-            $first = trim(strtok((string)$out, "\n") ?: 'invalid compose file');
-            throw new RuntimeException('Invalid compose file: ' . substr(preg_replace('/[^\x20-\x7E]/', '', $first), 0, 160));
-        }
-        $names = array_keys($cfg['services']);
-        if (count($names) > (int)$quota['max_containers']) {
-            throw new RuntimeException("Stack has " . count($names) . " services; your container quota is {$quota['max_containers']}");
-        }
-
-        $deny = ['privileged','pid','ipc','uts','userns_mode','network_mode','cgroup','cap_add','devices','sysctls','runtime','gpus',
-                 'volumes_from','external_links','oom_kill_disable','build','env_file','configs','secrets','provider','develop','pull_policy_dummy'];
-        foreach ($cfg['services'] as $name => $svc) {
-            foreach ($deny as $k) {
-                if (isset($svc[$k]) && $svc[$k] !== false && $svc[$k] !== [] && $svc[$k] !== null) throw new RuntimeException("Service '$name': '$k' is not allowed");
-            }
-            if (empty($svc['image']) || !preg_match('~^[A-Za-z0-9][A-Za-z0-9._\-/:@]{0,200}$~', (string)$svc['image'])) {
-                throw new RuntimeException("Service '$name': a plain image name is required");
-            }
-            foreach ((array)($svc['security_opt'] ?? []) as $so) {
-                if (stripos((string)$so, 'no-new-privileges') !== 0) throw new RuntimeException("Service '$name': security_opt '$so' is not allowed");
-            }
-            foreach ((array)($svc['extra_hosts'] ?? []) as $eh) {
-                if (stripos(is_string($eh) ? $eh : json_encode($eh), 'host-gateway') !== false) throw new RuntimeException("Service '$name': extra_hosts to the host is not allowed");
-            }
-            if ((int)($svc['scale'] ?? 1) > 1 || (int)($svc['deploy']['replicas'] ?? 1) > 1) throw new RuntimeException("Service '$name': replicas/scale above 1 are not allowed");
-            foreach ((array)($svc['ports'] ?? []) as $p) {
-                $pub = is_array($p) ? (string)($p['published'] ?? '') : '';
-                if ($pub === '') continue;                                     // container-only port: Docker picks a free host port
-                if (!ctype_digit($pub) || (int)$pub < self::STACK_PORT_MIN || (int)$pub > self::STACK_PORT_MAX) {
-                    throw new RuntimeException("Service '$name': published port $pub must be between " . self::STACK_PORT_MIN . " and " . self::STACK_PORT_MAX);
-                }
-            }
-            $root = rtrim((string)realpath($stackDir) ?: $stackDir, '/') . '/';
-            foreach ((array)($svc['volumes'] ?? []) as $v) {
-                $type = is_array($v) ? ($v['type'] ?? '') : '';
-                if ($type === 'bind') {
-                    $src = (string)($v['source'] ?? '');
-                    $real = realpath($src) ?: $src;
-                    if (strpos(rtrim($real, '/') . '/', $root) !== 0) throw new RuntimeException("Service '$name': bind mount '$src' is outside the stack folder");
-                } elseif ($type !== 'volume' && $type !== 'tmpfs') {
-                    throw new RuntimeException("Service '$name': unsupported mount type");
-                }
-            }
-        }
-        foreach ((array)($cfg['volumes'] ?? []) as $vn => $vol) {
-            $vol = is_array($vol) ? $vol : [];
-            if (!empty($vol['external']) || !empty($vol['driver_opts']) || (!empty($vol['driver']) && $vol['driver'] !== 'local')) {
-                throw new RuntimeException("Volume '$vn': external volumes, drivers and driver options are not allowed");
-            }
-        }
-        foreach ((array)($cfg['networks'] ?? []) as $nn => $net) {
-            $net = is_array($net) ? $net : [];
-            if (!empty($net['external']) || !empty($net['driver_opts']) || (!empty($net['driver']) && $net['driver'] !== 'bridge')) {
-                throw new RuntimeException("Network '$nn': external networks, drivers and driver options are not allowed");
-            }
-        }
-
-        $n = max(1, count($names));
-        $mem = max(64, (int)floor(((int)$quota['max_memory_mb']) / $n));
-        $cpu = max(0.1, round(((float)$quota['max_cpus']) / $n, 2));
-        $limits = [];
-        foreach ($names as $name) {
-            $limits[$name] = ['mem_limit' => "{$mem}m", 'cpus' => $cpu, 'pids_limit' => 512, 'security_opt' => ['no-new-privileges:true']];
-        }
-        return ['services' => $names, 'limits' => $limits];
-    }
-
-    /** Validate a customer stack on disk and (re)write the server-controlled limits file next to it. */
-    private function enforceStackPolicy(int $accountId, string $dir): void {
-        $account = $this->db->fetchOne("SELECT u.id AS user_id FROM accounts a JOIN users u ON u.id=a.user_id WHERE a.id=?", [$accountId]);
-        if (!$account) throw new RuntimeException("Account not found");
-        $r = self::checkStackPolicy("{$dir}/docker-compose.yml", $dir, $this->getQuota((int)$account['user_id']));
-        file_put_contents("{$dir}/docker-compose.novacpx-limits.yml", json_encode(['services' => $r['limits']], JSON_PRETTY_PRINT));
     }
 
     // ── Quotas ────────────────────────────────────────────────────────────────
@@ -1773,9 +1616,7 @@ SH;
         // Pull images and start stack in background (image pulls can take minutes)
         $dir    = $stack['dir'];
         $stackId = (int)$stack['id'];
-        $logFile = escapeshellarg("/tmp/novacpx-stack-{$stackId}.log");
-        $composeArgs = self::composeArgs(['stack_dir' => $dir]);
-        shell_exec("nohup sudo docker compose {$composeArgs} up -d > {$logFile} 2>&1 &");
+        Root::background('docker.compose', ['dir' => $dir, 'action' => 'up', 'quota' => $this->stackQuota($accountId)], "/tmp/novacpx-stack-{$stackId}.log");
         $this->db->execute("UPDATE docker_compose_stacks SET status='pending' WHERE id=?", [$stackId]);
         novacpx_log('info', "DockerManager: launching {$appKey} for account {$accountId} on {$domain} (async)");
         return ['stack_id' => $stackId, 'dir' => $dir, 'output' => 'Launching in background — refresh in a moment to see status'];

@@ -1,4 +1,5 @@
 <?php
+require_once NOVACPX_LIB . '/Root.php';
 $db   = DB::getInstance();
 $body = json_decode(file_get_contents('php://input'), true) ?? [];
 require_once NOVACPX_LIB . '/PHPManager.php';
@@ -100,12 +101,12 @@ match ($action) {
 
         $pkg = "php{$ver}-{$ext}";
         $sse("▶ Installing {$pkg}…\n");
-        $rc = $run("sudo apt-get install -y $pkg 2>&1");
+        $rc = $run(Root::shellCommand('pkg.apt', ['op' => 'install', 'packages' => [$pkg]]) . ' 2>&1');
 
         if ($rc !== 0) {
             // Try PECL fallback
             $sse("\n  apt package not found — trying PECL…\n");
-            $rc2 = $run("sudo php{$ver} /usr/bin/pecl install {$ext} 2>&1");
+            $rc2 = $run(Root::shellCommand('php.pecl', ['php_version' => $ver, 'extension' => $ext]) . ' 2>&1');
             if ($rc2 !== 0) {
                 $sse("  ✗ Could not install {$ext} via apt or PECL\n");
                 echo 'data: ' . json_encode(['done' => true, 'success' => false]) . "\n\n"; flush(); exit;
@@ -141,7 +142,7 @@ match ($action) {
 
         $pkg = "php{$ver}-{$ext}";
         $sse("▶ Removing {$pkg}…\n");
-        $run("sudo apt-get remove -y $pkg 2>&1");
+        $run(Root::shellCommand('pkg.apt', ['op' => 'remove', 'packages' => [$pkg]]) . ' 2>&1');
         $sse("\n▶ Reloading PHP {$ver} FPM…\n");
         $run("sudo systemctl reload php{$ver}-fpm 2>&1 || sudo systemctl restart php{$ver}-fpm 2>&1");
         $sse("  ✓ php{$ver}-{$ext} removed\n");

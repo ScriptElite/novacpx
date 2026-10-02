@@ -1,12 +1,14 @@
 <?php
 /**
- * Offline test for DockerManager::checkStackPolicy() and the catalog template generator.
+ * Offline test for ncr_stack_policy() and the catalog template generator.
  * Needs only php-cli and docker compose (it asks `docker compose config` to normalise each file); no panel, DB or containers.
  *   php tools/test-stack-policy.php [path/to/DockerManager.php]
  * Exit code 0 = every expectation held.
  */
 $lib = $argv[1] ?? __DIR__ . '/../panel/lib/DockerManager.php';
 require_once $lib;
+define('NOVACPX_ROOT_LIB', 1);
+require_once __DIR__ . '/../deploy/novacpx-root';
 
 $quota = ['max_containers' => 3, 'max_memory_mb' => 768, 'max_cpus' => 1.5];
 $fail = 0; $total = 0;
@@ -18,7 +20,7 @@ function check(string $name, string $yaml, array $quota, bool $expectOk, string 
     mkdir($dir, 0700, true);
     file_put_contents("$dir/docker-compose.yml", $yaml);
     $ok = true; $msg = '';
-    try { DockerManager::checkStackPolicy("$dir/docker-compose.yml", $dir, $quota); }
+    try { ncr_stack_policy("$dir/docker-compose.yml", $dir, $quota); }
     catch (RuntimeException $e) { $ok = false; $msg = $e->getMessage(); }
     shell_exec('rm -rf ' . escapeshellarg($dir));
     $good = ($ok === $expectOk) && ($expectOk || $mustMention === '' || stripos($msg, $mustMention) !== false);
@@ -77,7 +79,7 @@ foreach ($apps as $app) {
     catch (Throwable $e) { $broken[] = "$app (generator: " . $e->getMessage() . ")"; continue; }
     $dir = sys_get_temp_dir() . '/ncpx-cat-' . bin2hex(random_bytes(4)); mkdir($dir, 0700, true);
     file_put_contents("$dir/docker-compose.yml", $yaml);
-    try { DockerManager::checkStackPolicy("$dir/docker-compose.yml", $dir, ['max_containers' => 10, 'max_memory_mb' => 4096, 'max_cpus' => 4]); $passed[] = $app; }
+    try { ncr_stack_policy("$dir/docker-compose.yml", $dir, ['max_containers' => 10, 'max_memory_mb' => 4096, 'max_cpus' => 4]); $passed[] = $app; }
     catch (RuntimeException $e) {
         if (stripos($e->getMessage(), 'Invalid compose') === 0) $broken[] = "$app ({$e->getMessage()})";
         else $blocked[] = "$app: " . substr($e->getMessage(), 0, 60);

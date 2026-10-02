@@ -82,6 +82,11 @@ while IFS='|' read -r REPO_PATH WEB_ROOT COMMIT QUEUED_BRANCH; do
   # Copy VERSION to web root so /VERSION endpoint stays current
   [[ -f "$REPO_PATH/VERSION" ]] && cp "$REPO_PATH/VERSION" "$WEB_ROOT/VERSION"
 
+  # Keep the privileged helper in step with the panel code that calls it (installs /usr/local/sbin/novacpx-root + its sudoers)
+  if [[ -f "$REPO_PATH/deploy/install-root-helper.sh" ]]; then
+    bash "$REPO_PATH/deploy/install-root-helper.sh" >> "$LOG" 2>&1 || log "WARNING: privileged helper install failed"
+  fi
+
   # Run pending DB migrations (SQLite)
   MIGR_DIR="$REPO_PATH/db/migrations"
   if [[ -d "$MIGR_DIR" && -f "$DB_PATH" ]]; then

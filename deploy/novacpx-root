@@ -1,0 +1,1005 @@
+#!/usr/bin/php
+<?php
+/**
+ * novacpx-root - the ONLY thing the NovaCPX panel (PHP-FPM, user www-data) may run as root.
+ *
+ *   sudo -n /usr/local/sbin/novacpx-root <command>        parameters: one JSON object on stdin
+ *
+ * Replaces the sudoers wildcards (chown *, chmod *, useradd *, usermod *, tee <dir>/*, docker *, certbot *, ...),
+ * each of which let anything that could run code as www-data become root. Every command here does one panel job,
+ * validates every parameter against a strict pattern, never invokes a shell, never takes a path or option from the
+ * caller that it has not checked, and refuses to touch system accounts or files outside its own areas.
+ *
+ * Output: the command's own output on stdout (streaming), or one JSON document for the structured commands.
+ * Exit status: the underlying command's, 64 for a refused/invalid request.
+ *
+ * Source of truth: deploy/novacpx-root in the novacpx repo; installed to /usr/local/sbin by deploy/install-root-helper.sh.
+ * Offline tests load this file as a library (define NOVACPX_ROOT_LIB) - tools/test-root-helper.php.
+ */
+declare(strict_types=1);
+
+const NCR_APPS_DIR   = '/opt/novacpx/docker-apps';
+const NCR_STATE_DIR  = '/var/lib/novacpx-root';
+const NCR_UNRESTRICTED_FLAG = '/etc/novacpx/allow-unrestricted-stacks';   // root-created; absent = admin stacks are restricted too
+const NCR_PHP_VERSIONS = ['7.4', '8.0', '8.1', '8.2', '8.3', '8.4', '8.5'];
+const NCR_STACK_PORT_MIN = 10000;
+const NCR_STACK_PORT_MAX = 60000;
+
+class NcrRefused extends RuntimeException {}
+
+// ───────────────────────── validation ─────────────────────────
+
+function refuse(string $msg): never { throw new NcrRefused($msg); }
+
+function v_username(mixed $v): string {
+    if (!is_string($v) || !preg_match('/^[a-z][a-z0-9_]{1,31}$/', $v)) refuse('invalid username');
+    return $v;
+}
+
+/** An existing, panel-style hosting account: normal uid range, home exactly /home/<name>, no login shell, no privileged groups. */
+function v_managed_user(mixed $v): array {
+    $name = v_username($v);
+    $pw = posix_getpwnam($name);
+    if (!$pw) refuse('no such account');
+    if ($pw['uid'] < 1000 || $pw['uid'] >= 60000) refuse('not a hosting account');
+    if ($pw['dir'] !== "/home/{$name}") refuse('not a hosting account');
+    if (!in_array($pw['shell'], ['/sbin/nologin', '/usr/sbin/nologin', '/bin/false', '/usr/bin/false'], true)) refuse('not a hosting account (has a login shell)');
+    foreach (['root', 'sudo', 'adm', 'wheel', 'admin', 'docker', 'shadow', 'disk', 'lxd', 'systemd-journal', 'staff'] as $g) {
+        $gr = posix_getgrnam($g);
+        if ($gr && in_array($name, $gr['members'], true)) refuse('account is in a privileged group');
+    }
+    return $pw;
+}
+
+function v_domain(mixed $v): string {
+    if (!is_string($v) || strlen($v) > 253 || !preg_match('/^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/', $v)) refuse('invalid domain');
+    return $v;
+}
+
+function v_phpver(mixed $v): string {
+    if (!is_string($v) || !in_array($v, NCR_PHP_VERSIONS, true)) refuse('invalid PHP version');
+    return $v;
+}
+
+function v_int(mixed $v, int $min, int $max, string $what): int {
+    if (is_string($v) && ctype_digit($v)) $v = (int)$v;
+    if (!is_int($v) || $v < $min || $v > $max) refuse("invalid {$what}");
+    return $v;
+}
+
+function v_image(mixed $v): string {
+    if (!is_string($v) || !preg_match('~^[A-Za-z0-9][A-Za-z0-9._\-/:@]{0,200}$~', $v)) refuse('invalid image name');
+    return $v;
+}
+
+function v_ip(mixed $v): string {
+    if (!is_string($v) || !filter_var($v, FILTER_VALIDATE_IP)) refuse('invalid IP address');
+    return $v;
+}
+
+/** Container reference: 12-64 hex id or a novacpx-style name. */
+function v_container_ref(mixed $v): string {
+    if (!is_string($v) || !preg_match('/^([0-9a-f]{12,64}|[A-Za-z0-9][A-Za-z0-9_.-]{0,100})$/', $v)) refuse('invalid container reference');
+    return $v;
+}
+
+/** The stack directory must be exactly /opt/novacpx/docker-apps/(admin|account-N)/<name>, and a real directory (no symlinks). */
+function v_stack_dir(mixed $v): string {
+    if (!is_string($v) || !preg_match('~^' . preg_quote(NCR_APPS_DIR, '~') . '/(admin|account-[0-9]{1,9})/[a-z0-9_-]{1,64}$~', $v)) refuse('invalid stack directory');
+    if (is_link($v) || is_link(dirname($v))) refuse('stack directory is a symlink');
+    return $v;
+}
+
+function v_project(mixed $v): string {
+    if (!is_string($v) || !preg_match('/^novacpx-[a-z0-9_-]{1,100}$/', $v)) refuse('invalid compose project name');
+    return $v;
+}
+
+// ───────────────────────── process helpers ─────────────────────────
+
+/** Run argv (no shell). Streams output when $stream is true; returns [rc, collected output]. */
+function ncr_run(array $argv, ?string $stdin = null, bool $stream = false, array $env = [], ?string $cwd = null): array {
+    $proc = proc_open($argv, [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['redirect', 1]], $pipes, $cwd,
+        array_merge(['PATH' => '/usr/sbin:/usr/bin:/sbin:/bin', 'HOME' => '/root', 'LANG' => 'C.UTF-8'], $env));
+    if (!is_resource($proc)) return [127, "cannot start {$argv[0]}"];
+    if ($stdin !== null) fwrite($pipes[0], $stdin);
+    fclose($pipes[0]);
+    $out = '';
+    while (($chunk = fgets($pipes[1])) !== false) {
+        $out .= $chunk;
+        if ($stream) { echo $chunk; flush(); }
+    }
+    fclose($pipes[1]);
+    return [proc_close($proc), $out];
+}
+
+function ncr_out(array $r, bool $stream): int {
+    if (!$stream && $r[1] !== '') echo $r[1];
+    return (int)$r[0];
+}
+
+function ncr_json(mixed $data): int {
+    echo json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n";
+    return 0;
+}
+
+/** Write a file atomically with given owner/mode; never follows a symlink at the destination. */
+function ncr_write_file(string $path, string $content, int $mode = 0644, string $owner = 'root', string $group = 'root'): void {
+    if (is_link($path)) refuse('destination is a symlink');
+    $tmp = $path . '.ncr' . bin2hex(random_bytes(4));
+    if (file_put_contents($tmp, $content) === false) refuse('write failed');
+    chmod($tmp, $mode); chown($tmp, $owner); chgrp($tmp, $group);
+    if (!rename($tmp, $path)) { @unlink($tmp); refuse('write failed'); }
+}
+
+// ───────────────────────── accounts ─────────────────────────
+
+const NCR_RESERVED_USERS = ['root', 'daemon', 'bin', 'sys', 'sync', 'games', 'man', 'lp', 'mail', 'news', 'uucp', 'proxy', 'www-data', 'backup', 'list', 'irc',
+    'nobody', 'ubuntu', 'admin', 'administrator', 'sudo', 'postfix', 'dovecot', 'vmail', 'opendkim', 'bind', 'named', 'mysql', 'postgres', 'redis', 'nginx', 'apache',
+    'docker', 'ftp', 'sshd', 'syslog', 'systemd', 'messagebus', 'ntp', 'fail2ban', 'debian', 'pi', 'git', 'jenkins', 'claude'];
+
+function cmd_user_add(array $p): int {
+    $name = v_username($p['username'] ?? null);
+    if (in_array($name, NCR_RESERVED_USERS, true) || posix_getpwnam($name) || posix_getgrnam($name)) refuse('username not available');
+    [$rc, $out] = ncr_run(['useradd', '-m', '-d', "/home/{$name}", '-s', '/sbin/nologin', '-G', 'www-data', $name]);
+    echo $out;
+    return $rc;
+}
+
+function cmd_user_passwd(array $p): int {
+    $pw = v_managed_user($p['username'] ?? null);
+    $pass = $p['password'] ?? null;
+    if (!is_string($pass) || $pass === '' || strlen($pass) > 128 || preg_match('/[\r\n\0]/', $pass)) refuse('invalid password');
+    [$rc, $out] = ncr_run(['chpasswd'], "{$pw['name']}:{$pass}\n");
+    echo $out;
+    return $rc;
+}
+
+function cmd_user_lock(array $p): int {
+    $pw = v_managed_user($p['username'] ?? null);
+    [$rc, $out] = ncr_run(['usermod', !empty($p['unlock']) ? '-U' : '-L', $pw['name']]);
+    echo $out;
+    return $rc;
+}
+
+function cmd_user_del(array $p): int {
+    $pw = v_managed_user($p['username'] ?? null);
+    [$rc, $out] = ncr_run(['userdel', '-r', $pw['name']]);
+    echo $out;
+    return $rc;
+}
+
+/** Create the standard directory layout for a hosting account and hand it to the account. */
+function cmd_home_init(array $p): int {
+    $pw = v_managed_user($p['username'] ?? null);
+    $home = "/home/{$pw['name']}";
+    foreach (['public_html', 'logs', 'tmp'] as $d) {
+        $path = "{$home}/{$d}";
+        if (is_link($path)) refuse("{$d} is a symlink");
+        if (!is_dir($path) && !mkdir($path, 0755, true)) refuse("cannot create {$d}");
+    }
+    [$rc, $out] = ncr_run(['chown', '-R', '-h', "{$pw['name']}:www-data", $home]);   // -h: never follow links
+    if ($rc !== 0) { echo $out; return $rc; }
+    chmod($home, 0750);
+    chmod("{$home}/public_html", 0775);
+    return 0;
+}
+
+/** First-visit page for a new account. Only creates it (O_EXCL semantics), never overwrites or follows a link. */
+function cmd_home_index(array $p): int {
+    $pw = v_managed_user($p['username'] ?? null);
+    $html = $p['html'] ?? null;
+    if (!is_string($html) || strlen($html) > 65536) refuse('invalid page content');
+    $path = "/home/{$pw['name']}/public_html/index.html";
+    $fh = @fopen($path, 'x');
+    if ($fh === false) return 0;   // already exists: leave it alone
+    fwrite($fh, $html); fclose($fh);
+    chown($path, $pw['name']); chgrp($path, 'www-data'); chmod($path, 0664);
+    return 0;
+}
+
+// ───────────────────────── DKIM ─────────────────────────
+
+function cmd_dkim_genkey(array $p): int {
+    $domain   = v_domain($p['domain'] ?? null);
+    $selector = $p['selector'] ?? 'mail';
+    if (!is_string($selector) || !preg_match('/^[a-z][a-z0-9]{1,30}$/', $selector)) refuse('invalid selector');
+    $dir = "/etc/opendkim/keys/{$domain}";
+    if (is_link($dir) || is_link('/etc/opendkim/keys')) refuse('key directory is a symlink');
+    if (!is_dir($dir) && !mkdir($dir, 0750, true)) refuse('cannot create key directory');
+    [$rc, $out] = ncr_run(['opendkim-genkey', '-b', '2048', '-s', $selector, '-d', $domain, '-D', $dir]);
+    if ($rc !== 0) { echo $out; return $rc; }
+    ncr_run(['chown', '-R', '-h', 'opendkim:opendkim', $dir]);
+    $txt = @file_get_contents("{$dir}/{$selector}.txt");
+    return ncr_json(['dir' => $dir, 'selector' => $selector, 'txt' => $txt === false ? '' : $txt]);
+}
+
+/** Add (or replace) a domain's line in the opendkim signing/key tables, then reload opendkim. */
+function cmd_dkim_register(array $p): int {
+    $domain   = v_domain($p['domain'] ?? null);
+    $selector = $p['selector'] ?? 'mail';
+    if (!is_string($selector) || !preg_match('/^[a-z][a-z0-9]{1,30}$/', $selector)) refuse('invalid selector');
+    $keyDir = "/etc/opendkim/keys/{$domain}";
+    if (!is_file("{$keyDir}/{$selector}.private")) refuse('no such key');
+    $edit = function (string $file, string $line) use ($domain): void {
+        $lines = is_file($file) ? file($file, FILE_IGNORE_NEW_LINES) : [];
+        $lines = array_values(array_filter($lines, fn($l) => !str_starts_with($l, "{$domain} ") && !str_starts_with($l, "*@{$domain} ")));
+        $lines[] = $line;
+        ncr_write_file($file, implode("\n", $lines) . "\n", 0640, 'opendkim', 'opendkim');
+    };
+    $edit('/etc/opendkim/signing.table', "*@{$domain} {$domain}");
+    $edit('/etc/opendkim/key.table', "{$domain} {$domain}:{$selector}:{$keyDir}/{$selector}.private");
+    [$rc] = ncr_run(['systemctl', 'reload', 'opendkim']);
+    return 0;
+}
+
+// ───────────────────────── web: vhosts, certificates, php-fpm pools ─────────────────────────
+
+function ncr_webserver(): string {
+    $ini = @parse_ini_file('/etc/novacpx/config.ini', true) ?: [];
+    $s = $ini['web']['server'] ?? 'apache';   // same default as panel/lib/Core.php WEB_SERVER
+    return $s === 'nginx' ? 'nginx' : 'apache';
+}
+
+function v_cert_paths(string $user): array {
+    $dir = "/etc/novacpx/ssl/accounts/{$user}";
+    return [$dir, "{$dir}/cert.pem", "{$dir}/key.pem"];
+}
+
+/** Generate a vhost for a hosting account from validated parameters (the caller never supplies configuration text). */
+function ncr_vhost_text(string $web, string $user, string $domain, string $phpVer, bool $ssl, int $apachePort, bool $suspended): string {
+    $docRoot = $suspended ? '/var/novacpx/suspended' : "/home/{$user}/public_html";
+    $logDir  = "/home/{$user}/logs";
+    $sock    = "/run/php/php{$phpVer}-fpm-{$user}.sock";
+    [$certDir] = v_cert_paths($user);
+    if ($web === 'nginx') {
+        $listen = $ssl ? "listen 443 ssl http2;\n    listen 80;\n    ssl_certificate {$certDir}/cert.pem;\n    ssl_certificate_key {$certDir}/key.pem;" : 'listen 80;';
+        return "server {
+    {$listen}
+    server_name {$domain} www.{$domain};
+    root {$docRoot};
+    index index.php index.html index.htm;
+    access_log {$logDir}/access.log;
+    error_log  {$logDir}/error.log;
+
+    location / { try_files \$uri \$uri/ /index.php?\$query_string; }
+    location ~ \\.php\$ {
+        fastcgi_pass unix:{$sock};
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+        fastcgi_param PHP_VALUE \"error_log={$logDir}/php.log\";
+    }
+    location ~ /\\.ht { deny all; }
+    location ~* \\.(jpg|jpeg|png|gif|ico|css|js|svg|woff2)\$ { expires 30d; add_header Cache-Control public; }
+}
+";
+    }
+    $head = $ssl ? "<VirtualHost *:443>\n    SSLEngine on\n    SSLCertificateFile {$certDir}/cert.pem\n    SSLCertificateKeyFile {$certDir}/key.pem" : "<VirtualHost *:{$apachePort}>";
+    $conf = "{$head}
+    ServerName {$domain}
+    ServerAlias www.{$domain}
+    DocumentRoot {$docRoot}
+    ErrorLog  {$logDir}/error.log
+    CustomLog {$logDir}/access.log combined
+
+    <Directory {$docRoot}>
+        Options -Indexes +FollowSymLinks +MultiViews
+        AllowOverride All
+        Require all granted
+    </Directory>
+    <FilesMatch \\.php\$>
+        SetHandler \"proxy:unix:{$sock}|fcgi://localhost/\"
+    </FilesMatch>
+</VirtualHost>
+";
+    if ($ssl) $conf .= "\n<VirtualHost *:{$apachePort}>\n    ServerName {$domain}\n    Redirect permanent / https://{$domain}/\n</VirtualHost>\n";
+    return $conf;
+}
+
+function ncr_web_reload(string $web, bool $stream = false): int {
+    if ($web === 'nginx') {
+        [$rc, $out] = ncr_run(['nginx', '-t']);
+        if ($rc !== 0) { echo $out; return $rc; }
+        [$rc, $out] = ncr_run(['systemctl', 'reload', 'nginx']);
+    } else {
+        [$rc, $out] = ncr_run(['apache2ctl', 'configtest']);
+        if ($rc !== 0) { echo $out; return $rc; }
+        [$rc, $out] = ncr_run(['systemctl', 'reload', 'apache2']);
+    }
+    echo $out;
+    return $rc;
+}
+
+function cmd_web_vhost_write(array $p): int {
+    $pw     = v_managed_user($p['username'] ?? null);
+    $user   = $pw['name'];
+    $domain = v_domain($p['domain'] ?? null);
+    $ver    = v_phpver($p['php_version'] ?? null);
+    // TLS is on whenever a certificate has been stored for the account (web.ssl.store); the panel cannot see that directory.
+    [, $certFile, $keyFile] = v_cert_paths($user);
+    $ssl    = is_file($certFile) && is_file($keyFile);
+    $susp   = !empty($p['suspended']);
+    $port   = v_int($p['apache_port'] ?? 80, 1, 65535, 'apache port');
+    $web    = ncr_webserver();
+    if ($susp) {
+        @mkdir('/var/novacpx/suspended', 0755, true);
+        ncr_write_file("/var/novacpx/suspended/{$domain}.html",
+            "<html><body style='font-family:sans-serif;text-align:center;padding:4rem;background:#0d0f17;color:#e2e4f0'><h1 style='color:#ef4444'>Account Suspended</h1><p>This account has been suspended. Please contact support.</p></body></html>");
+    }
+    $text = ncr_vhost_text($web, $user, $domain, $ver, $ssl, $port, $susp);
+    if ($web === 'nginx') {
+        $avail = "/etc/nginx/sites-available/novacpx-{$user}.conf";
+        $link  = "/etc/nginx/sites-enabled/novacpx-{$user}.conf";
+        ncr_write_file($avail, $text);
+        if (!is_link($link) || readlink($link) !== $avail) { @unlink($link); symlink($avail, $link); }
+    } else {
+        $avail = "/etc/apache2/sites-available/novacpx-{$user}.conf";
+        ncr_write_file($avail, $text);
+        ncr_run(['a2ensite', "novacpx-{$user}"]);
+    }
+    return ncr_web_reload($web);
+}
+
+function cmd_web_vhost_remove(array $p): int {
+    $user = v_username($p['username'] ?? null);   // account may already be gone: only the name pattern matters
+    $web = ncr_webserver();
+    if ($web === 'nginx') {
+        @unlink("/etc/nginx/sites-enabled/novacpx-{$user}.conf");
+        @unlink("/etc/nginx/sites-available/novacpx-{$user}.conf");
+    } else {
+        ncr_run(['a2dissite', "novacpx-{$user}"]);
+        @unlink("/etc/apache2/sites-available/novacpx-{$user}.conf");
+    }
+    return ncr_web_reload($web);
+}
+
+/** Store a certificate + key for an account (validated as a matching pair) under /etc/novacpx/ssl/accounts/<user>. */
+function cmd_web_ssl_store(array $p): int {
+    $pw = v_managed_user($p['username'] ?? null);
+    $cert = $p['cert'] ?? null; $key = $p['key'] ?? null; $chain = $p['chain'] ?? '';
+    foreach ([$cert, $key] as $x) if (!is_string($x) || strlen($x) > 32768 || !str_contains($x, '-----BEGIN ')) refuse('invalid certificate or key');
+    if (!is_string($chain) || strlen($chain) > 65536) refuse('invalid chain');
+    $c = openssl_x509_read($cert); $k = openssl_pkey_get_private($key);
+    if (!$c || !$k || !openssl_x509_check_private_key($c, $k)) refuse('certificate and key do not match');
+    [$dir, $cf, $kf] = v_cert_paths($pw['name']);
+    if (is_link($dir)) refuse('certificate directory is a symlink');
+    if (!is_dir($dir) && !mkdir($dir, 0700, true)) refuse('cannot create certificate directory');
+    ncr_write_file($cf, $cert . "\n", 0644);
+    ncr_write_file($kf, $key . "\n", 0600);
+    if ($chain !== '') ncr_write_file("{$dir}/chain.pem", $chain . "\n", 0644);
+    return 0;
+}
+
+function ncr_pool_text(string $user, string $ver, array $s): string {
+    $home = "/home/{$user}";
+    $sock = "/run/php/php{$ver}-fpm-{$user}.sock";
+    $size = fn($v, $d) => (is_string($v) && preg_match('/^[0-9]{1,5}[KMG]?$/', $v)) ? $v : $d;
+    $mem  = $size($s['memory_limit'] ?? '256M', '256M');
+    $up   = $size($s['upload_max_filesize'] ?? '64M', '64M');
+    $post = $size($s['post_max_size'] ?? '64M', '64M');
+    $exe  = v_int($s['max_execution_time'] ?? 30, 1, 3600, 'max_execution_time');
+    return "[{$user}]
+user  = {$user}
+group = www-data
+listen = {$sock}
+listen.owner = www-data
+listen.group = www-data
+listen.mode  = 0660
+
+pm = ondemand
+pm.max_children     = 5
+pm.process_idle_timeout = 10s
+pm.max_requests     = 500
+
+php_admin_value[error_log]     = {$home}/logs/php.log
+php_admin_value[open_basedir]  = {$home}/:/tmp/
+php_admin_flag[log_errors]     = on
+php_admin_value[disable_functions] = exec,passthru,shell_exec,system,proc_open,popen
+php_value[upload_max_filesize] = {$up}
+php_value[post_max_size]       = {$post}
+php_value[memory_limit]        = {$mem}
+php_value[max_execution_time]  = {$exe}
+";
+}
+
+function cmd_php_pool_write(array $p): int {
+    $pw  = v_managed_user($p['username'] ?? null);
+    $ver = v_phpver($p['php_version'] ?? null);
+    $dir = "/etc/php/{$ver}/fpm/pool.d";
+    if (!is_dir($dir)) refuse('PHP version not installed');
+    ncr_write_file("{$dir}/{$pw['name']}.conf", ncr_pool_text($pw['name'], $ver, is_array($p['settings'] ?? null) ? $p['settings'] : []));
+    @touch("/tmp/.ncr-fpm-{$ver}");
+    ncr_run(['systemctl', 'reload', "php{$ver}-fpm"]);
+    return 0;
+}
+
+function cmd_php_pool_remove(array $p): int {
+    $user = v_username($p['username'] ?? null);
+    foreach (NCR_PHP_VERSIONS as $ver) {
+        $f = "/etc/php/{$ver}/fpm/pool.d/{$user}.conf";
+        if (is_file($f) || is_link($f)) { @unlink($f); ncr_run(['systemctl', 'reload', "php{$ver}-fpm"]); }
+    }
+    return 0;
+}
+
+/** Move Apache's customer vhosts (and ports.conf) from one port to another: the "local proxy" mode of the panel. */
+function cmd_web_apache_port(array $p): int {
+    $from = v_int($p['from'] ?? null, 1, 65535, 'port');
+    $to   = v_int($p['to'] ?? null, 1, 65535, 'port');
+    $changed = 0;
+    foreach (glob('/etc/apache2/sites-available/novacpx-*.conf') ?: [] as $f) {
+        if (is_link($f)) continue;
+        $orig = (string)file_get_contents($f);
+        $new  = str_replace(["<VirtualHost *:{$from}>", "VirtualHost *:{$from}"], ["<VirtualHost *:{$to}>", "VirtualHost *:{$to}"], $orig);
+        if ($new !== $orig) { ncr_write_file($f, $new); $changed++; }
+    }
+    $ports = (string)@file_get_contents('/etc/apache2/ports.conf');
+    $ports = preg_replace('/^Listen\s+' . $from . '\b/m', "Listen {$to}", $ports);
+    if ($to !== 80) {   // proxy mode: nginx owns 443
+        $ports = preg_replace('/^Listen\s+443\b/m', '', $ports);
+        $ports = preg_replace('/<IfModule ssl_module>.*?<\/IfModule>/s', '', $ports);
+    } elseif (!str_contains($ports, 'Listen 443')) {
+        $ports .= "
+<IfModule ssl_module>
+    Listen 443
+</IfModule>
+";
+    }
+    ncr_write_file('/etc/apache2/ports.conf', $ports);
+    return ncr_json(['changed' => $changed]);
+}
+
+/** nginx reverse-proxy hosts, generated from structured data only (no caller-supplied nginx text). */
+function cmd_proxy_sync(array $p): int {
+    $hosts = $p['hosts'] ?? [];
+    if (!is_array($hosts) || count($hosts) > 1000) refuse('invalid host list');
+    foreach (glob('/etc/nginx/sites-available/novacpx-proxy-*.conf') ?: [] as $f) @unlink($f);
+    foreach (glob('/etc/nginx/sites-enabled/novacpx-proxy-*.conf') ?: [] as $f) @unlink($f);
+    foreach ($hosts as $h) {
+        $domain = v_domain($h['domain'] ?? null);
+        $up = $h['upstream'] ?? '';
+        if (!is_string($up) || !preg_match('#^https?://[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$#', $up)) refuse('invalid upstream');
+        $up = rtrim($up, '/');
+        $ssl = !empty($h['ssl_enabled']);
+        $certDir = "/etc/novacpx/ssl/accounts/{$domain}";
+        $c  = "server {
+    listen 80;
+" . ($ssl ? "    listen 443 ssl http2;
+" : '');
+        $c .= "    server_name {$domain} www.{$domain};
+";
+        if ($ssl) $c .= "    ssl_certificate {$certDir}/cert.pem;
+    ssl_certificate_key {$certDir}/key.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+";
+        $c .= "    location / {
+        proxy_pass {$up};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+"
+            . "        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+"
+            . "        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection 'upgrade';
+"
+            . "        proxy_cache_bypass \$http_upgrade;
+        proxy_read_timeout 86400;
+    }
+}
+";
+        $avail = "/etc/nginx/sites-available/novacpx-proxy-{$domain}.conf";
+        $link  = "/etc/nginx/sites-enabled/novacpx-proxy-{$domain}.conf";
+        ncr_write_file($avail, $c);
+        @unlink($link); symlink($avail, $link);
+    }
+    return ncr_web_reload('nginx');
+}
+
+// ───────────────────────── mail (postfix maps) ─────────────────────────
+
+function cmd_mail_sync(array $p): int {
+    $email = fn($v) => is_string($v) && preg_match('/^[A-Za-z0-9._%+-]{1,64}@([a-z0-9-]+\.)+[a-z]{2,63}$/', $v);
+    $mail = '';
+    foreach ((array)($p['mailboxes'] ?? []) as $m) {
+        $u = $m['username'] ?? null;
+        if (!is_array($m) || !$email($m['email'] ?? null) || !is_string($u) || !preg_match('/^[a-z][a-z0-9_]{1,31}$/', $u)) refuse('invalid mailbox entry');
+        [$local, $dom] = explode('@', $m['email'], 2);
+        if (!preg_match('/^[A-Za-z0-9._%+-]+$/', $local)) refuse('invalid mailbox entry');
+        $mail .= "{$m['email']}   {$u}/{$dom}/{$local}/\n";
+    }
+    $alias = '';
+    foreach ((array)($p['aliases'] ?? []) as $a) {
+        if (!is_array($a) || !$email($a['source'] ?? null) || !$email($a['destination'] ?? null)) refuse('invalid alias entry');
+        $alias .= "{$a['source']}   {$a['destination']}\n";
+    }
+    $doms = '';
+    foreach ((array)($p['domains'] ?? []) as $d) { v_domain($d); $doms .= "{$d}   novacpx\n"; }
+    foreach (['mailboxes' => $mail, 'aliases' => $alias, 'domains' => $doms] as $name => $content) {
+        $f = "/etc/postfix/novacpx_{$name}";
+        ncr_write_file($f, $content, 0644);
+        ncr_run(['postmap', $f]);
+    }
+    ncr_run(['systemctl', 'reload', 'postfix']);
+    return 0;
+}
+
+// ───────────────────────── DNS zones ─────────────────────────
+
+const NCR_ZONES_DIR = '/etc/bind/novacpx-zones';
+const NCR_NAMED_INCLUDE = '/etc/bind/named.conf.novacpx';
+
+/** A zone file is accepted only if every line is a comment, part of the SOA block, or a plain resource record. */
+function ncr_check_zone_text(string $domain, string $text): void {
+    if (strlen($text) > 262144) refuse('zone too large');
+    $name = '(?:@|[A-Za-z0-9_*.-]{1,253})';
+    $types = '(?:A|AAAA|CNAME|MX|TXT|NS|SRV|CAA|PTR)';
+    foreach (preg_split('/\r?\n/', $text) as $i => $line) {
+        $t = trim($line);
+        if ($t === '' || $t[0] === ';' || $t === ')' || $t === '(') continue;
+        if (str_starts_with($t, '$')) {
+            if (preg_match('/^\$TTL\s+\d{1,9}$/', $t)) continue;
+            if (preg_match('/^\$ORIGIN\s+' . preg_quote($domain, '/') . '\.$/', $t)) continue;   // only the zone's own name
+            refuse("zone line " . ($i + 1) . ": directive not allowed");
+        }
+        if (preg_match('/^' . $name . '\s+(?:\d+\s+)?IN\s+SOA\s+[A-Za-z0-9.-]+\s+[A-Za-z0-9.@-]+\s*\(?$/', $t)) continue;
+        if (preg_match('/^\d+\s*;\s*[a-z ]+$/i', $t)) continue;                         // serial/refresh/retry/expire/minimum lines
+        if (preg_match('/^' . $name . '\s+(?:\d+\s+)?IN\s+' . $types . '\s+[^\s;]+/', $t) || preg_match('/^' . $name . '\s+(?:\d+\s+)?IN\s+' . $types . '\s+.+$/', $t)) {
+            if (preg_match('/[\x00-\x08\x0b-\x1f]/', $t)) refuse("zone line " . ($i + 1) . ": control characters");
+            continue;
+        }
+        if (preg_match('/^@\s+IN\s+NS\s+[A-Za-z0-9.-]+\.?$/', $t)) continue;
+        refuse("zone line " . ($i + 1) . " is not a plain DNS record");
+    }
+}
+
+/** Rewrite the include list of every zone file, make sure named.conf includes it, and tell BIND to reload. */
+function ncr_dns_rebuild(): void {
+    $conf = "// NovaCPX auto-generated zone list\n";
+    foreach (glob(NCR_ZONES_DIR . '/*.zone') ?: [] as $f) {
+        $d = basename($f, '.zone');
+        $conf .= "zone \"{$d}\" { type master; file \"" . NCR_ZONES_DIR . "/{$d}.zone\"; };\n";
+    }
+    ncr_write_file(NCR_NAMED_INCLUDE, $conf, 0644, 'root', 'bind');
+    $main = '/etc/bind/named.conf';
+    if (is_file($main) && !str_contains((string)file_get_contents($main), 'named.conf.novacpx')) {
+        file_put_contents($main, "\ninclude \"" . NCR_NAMED_INCLUDE . "\";\n", FILE_APPEND);
+    }
+    [$rc] = ncr_run(['rndc', 'reload']);
+    if ($rc !== 0) ncr_run(['systemctl', 'reload', is_file('/lib/systemd/system/named.service') || is_file('/usr/lib/systemd/system/named.service') ? 'named' : 'bind9']);
+}
+
+function cmd_dns_zone(array $p): int {
+    $d = v_domain($p['domain'] ?? null);
+    $text = $p['content'] ?? null;
+    if (!is_string($text)) refuse('invalid zone content');
+    ncr_check_zone_text($d, $text);
+    if (!is_dir(NCR_ZONES_DIR) && !mkdir(NCR_ZONES_DIR, 0755, true)) refuse('cannot create the zone directory');
+    $f = NCR_ZONES_DIR . "/{$d}.zone";
+    $tmp = NCR_ZONES_DIR . "/.{$d}.zone.check";
+    ncr_write_file($tmp, $text, 0644, 'root', 'bind');
+    [$rc, $out] = ncr_run(['named-checkzone', $d, $tmp]);   // validate the candidate before it replaces the live file
+    if ($rc !== 0) {
+        @unlink($tmp);
+        echo $out;
+        if (preg_match('/:(\d+): /', $out, $m)) { $lines = preg_split('/\r?\n/', $text); echo "offending line {$m[1]}: " . ($lines[(int)$m[1] - 1] ?? '') . "\n"; }
+        return $rc;
+    }
+    rename($tmp, $f);
+    ncr_dns_rebuild();
+    return 0;
+}
+
+function cmd_dns_remove(array $p): int {
+    $d = v_domain($p['domain'] ?? null);
+    @unlink(NCR_ZONES_DIR . "/{$d}.zone");
+    ncr_dns_rebuild();
+    return 0;
+}
+
+// ───────────────────────── packages ─────────────────────────
+
+function v_package(mixed $v): string {
+    // Only the packages the panel's own features install: PHP extensions, mail/ftp/dns/web stacks, certbot, opendkim ...
+    if (!is_string($v) || !preg_match('/^(php[0-9]\.[0-9]-[a-z0-9-]{1,40}|rspamd|dovecot-[a-z0-9-]{1,30}|postfix|postfix-[a-z0-9-]{1,20}|proftpd(-[a-z]{1,15})?|vsftpd|pure-ftpd|bind9|bind9utils|pdns-server|pdns-backend-[a-z0-9]{1,15}|nsd|nginx|apache2|libapache2-mod-[a-z0-9-]{1,30}|certbot|python3-certbot-[a-z-]{1,20}|opendkim|opendkim-tools|fail2ban|ufw|redis-server|memcached|docker-compose-plugin)$/', $v)) {
+        refuse('package not in the allowed list');
+    }
+    return $v;
+}
+
+function cmd_pkg_apt(array $p): int {
+    $op = $p['op'] ?? '';
+    $env = ['DEBIAN_FRONTEND' => 'noninteractive'];
+    if ($op === 'update')  { return ncr_out(ncr_run(['apt-get', 'update', '-q'], null, true, $env), true); }
+    if ($op === 'upgrade') { return ncr_out(ncr_run(['apt-get', 'upgrade', '-y', '-o', 'Dpkg::Options::=--force-confdef', '-o', 'Dpkg::Options::=--force-confold'], null, true, $env), true); }
+    if (!in_array($op, ['install', 'remove'], true)) refuse('invalid operation');
+    $pkgs = $p['packages'] ?? null;
+    if (!is_array($pkgs) || !$pkgs || count($pkgs) > 10) refuse('invalid package list');
+    $pkgs = array_map('v_package', $pkgs);
+    return ncr_out(ncr_run(array_merge(['apt-get', $op, '-y'], $pkgs), null, true, $env), true);
+}
+
+function cmd_php_pecl(array $p): int {
+    $ver = v_phpver($p['php_version'] ?? null);
+    $ext = $p['extension'] ?? null;
+    if (!is_string($ext) || !preg_match('/^[a-z][a-z0-9_]{1,30}$/', $ext)) refuse('invalid extension');
+    return ncr_out(ncr_run(["php{$ver}", '/usr/bin/pecl', 'install', $ext], null, true), true);
+}
+
+// ───────────────────────── fail2ban ─────────────────────────
+
+function cmd_fail2ban(array $p): int {
+    $a = $p['args'] ?? null;
+    if (!is_array($a) || !$a) refuse('invalid arguments');
+    $a = array_values(array_map('strval', $a));
+    $jail = fn($j) => is_string($j) && preg_match('/^[A-Za-z0-9_-]{1,40}$/', $j) ? $j : refuse('invalid jail');
+    $ok = false;
+    if ($a === ['status'] || $a === ['reload'] || $a === ['ping']) $ok = true;
+    elseif (count($a) === 2 && $a[0] === 'status') { $jail($a[1]); $ok = true; }
+    elseif (count($a) === 4 && $a[0] === 'set' && in_array($a[2], ['banip', 'unbanip'], true)) { $jail($a[1]); v_ip($a[3]); $ok = true; }
+    if (!$ok) refuse('fail2ban command not permitted');
+    return ncr_out(ncr_run(array_merge(['fail2ban-client'], $a)), false);
+}
+
+/** [DEFAULT] settings of jail.local that the panel edits (ignoreip list, bantime/findtime/maxretry). */
+function cmd_fail2ban_defaults(array $p): int {
+    $file = '/etc/fail2ban/jail.local';
+    $content = is_file($file) ? (string)file_get_contents($file) : "[DEFAULT]\n";
+    $set = function (string $key, string $val) use (&$content): void {
+        if (preg_match('/^\s*' . preg_quote($key, '/') . '\s*=/m', $content)) {
+            $content = preg_replace('/^(\s*' . preg_quote($key, '/') . '\s*=\s*).*$/m', '${1}' . $val, $content, 1);
+        } else {
+            $content = preg_replace('/(\[DEFAULT\][^\[]*)/s', '$1' . "{$key} = {$val}\n", $content, 1);
+        }
+    };
+    if (isset($p['ignoreip'])) {
+        $ips = $p['ignoreip'];
+        if (!is_array($ips) || count($ips) > 200) refuse('invalid ignoreip list');
+        foreach ($ips as $ip) { if (!is_string($ip) || !filter_var(explode('/', $ip)[0], FILTER_VALIDATE_IP) || !preg_match('~^[0-9a-fA-F:.]+(/[0-9]{1,3})?$~', $ip)) refuse('invalid ignoreip entry'); }
+        $set('ignoreip', implode(' ', $ips));
+    }
+    foreach (['bantime' => [60, 31536000], 'findtime' => [60, 31536000], 'maxretry' => [1, 1000]] as $k => [$lo, $hi]) {
+        if (isset($p[$k])) $set($k, (string)v_int($p[$k], $lo, $hi, $k));
+    }
+    ncr_write_file($file, $content, 0644);
+    ncr_run(['fail2ban-client', 'reload']);
+    return 0;
+}
+
+// ───────────────────────── docker ─────────────────────────
+
+function ncr_docker(array $args, bool $stream = false, ?string $stdin = null, ?string $cwd = null): array {
+    return ncr_run(array_merge(['docker'], $args), $stdin, $stream, [], $cwd);
+}
+
+/** Is this container (or its compose project) one the panel created? */
+function ncr_container_managed(string $ref): bool {
+    [$rc, $out] = ncr_docker(['inspect', '--format', '{{.Name}}|{{index .Config.Labels "com.docker.compose.project"}}|{{index .Config.Labels "com.docker.compose.project.working_dir"}}', $ref]);
+    if ($rc !== 0) refuse('no such container');
+    [$name, $proj, $wd] = array_pad(explode('|', trim($out), 3), 3, '');
+    return str_starts_with($name, '/novacpx-') || str_starts_with($proj, 'novacpx-') || str_starts_with($wd, NCR_APPS_DIR . '/');
+}
+
+function cmd_docker_status(array $p): int {
+    [$rc, $ver] = ncr_docker(['version', '--format', '{{.Server.Version}}']);
+    $df = [];
+    if ($rc === 0) {
+        [, $raw] = ncr_docker(['system', 'df', '--format', 'json']);
+        foreach (explode("\n", trim($raw)) as $l) { $o = json_decode($l, true); if ($o) $df[] = $o; }
+    }
+    return ncr_json(['version' => $rc === 0 ? trim($ver) : '', 'disk' => $df]);
+}
+
+function cmd_docker_prune(array $p): int {
+    return ncr_out(ncr_docker(array_merge(['system', 'prune', '-f'], !empty($p['volumes']) ? ['--volumes'] : [])), false);
+}
+
+/** {ids:[...]} -> {id: state} for novacpx-managed containers only. */
+function cmd_docker_states(array $p): int {
+    $res = [];
+    foreach ((array)($p['ids'] ?? []) as $id) {
+        $id = v_container_ref($id);
+        if (!ncr_container_managed_quiet($id)) continue;
+        [$rc, $out] = ncr_docker(['inspect', '--format', '{{.State.Status}}', $id]);
+        if ($rc === 0) $res[$id] = trim($out);
+    }
+    return ncr_json($res);
+}
+
+function ncr_container_managed_quiet(string $ref): bool {
+    try { return ncr_container_managed($ref); } catch (NcrRefused) { return false; }
+}
+
+function cmd_docker_action(array $p): int {
+    $id = v_container_ref($p['id'] ?? null);
+    $action = $p['action'] ?? '';
+    if (!in_array($action, ['start', 'stop', 'restart', 'pause', 'unpause', 'kill'], true)) refuse('invalid action');
+    if (!ncr_container_managed($id)) refuse('not a NovaCPX container');
+    return ncr_out(ncr_docker([$action, $id]), false);
+}
+
+function cmd_docker_rm(array $p): int {
+    $id = v_container_ref($p['id'] ?? null);
+    if (!ncr_container_managed($id)) refuse('not a NovaCPX container');
+    return ncr_out(ncr_docker(array_merge(['rm'], !empty($p['force']) ? ['-f'] : [], [$id])), false);
+}
+
+function cmd_docker_logs(array $p): int {
+    $id = v_container_ref($p['id'] ?? null);
+    if (!ncr_container_managed($id)) refuse('not a NovaCPX container');
+    return ncr_out(ncr_docker(['logs', '--tail=' . v_int($p['lines'] ?? 100, 1, 2000, 'lines'), $id]), false);
+}
+
+function cmd_docker_inspect(array $p): int {
+    $id = v_container_ref($p['id'] ?? null);
+    if (!ncr_container_managed($id)) refuse('not a NovaCPX container');
+    return ncr_out(ncr_docker(['inspect', $id]), false);
+}
+
+function cmd_docker_run(array $p): int {
+    $name = $p['name'] ?? null;
+    if (!is_string($name) || !preg_match('/^novacpx-[a-z0-9_]{2,32}-[a-z0-9_-]{1,60}$/', $name)) refuse('invalid container name');
+    $image = v_image($p['image'] ?? null);
+    $mem   = v_int($p['memory_mb'] ?? null, 32, 65536, 'memory');
+    $cpus  = $p['cpus'] ?? null;
+    if (!is_numeric($cpus) || (float)$cpus < 0.1 || (float)$cpus > 64) refuse('invalid cpus');
+    $args = ['run', '-d', '--name', $name, "--memory={$mem}m", '--cpus=' . (float)$cpus, '--pids-limit=512',
+             '--security-opt=no-new-privileges:true', '--restart=unless-stopped', '--label', 'novacpx.managed=1'];
+    foreach ((array)($p['ports'] ?? []) as $port) {
+        if (!is_string($port) || !preg_match('/^(\d{1,5}):(\d{1,5})$/', $port, $m)) refuse('invalid port mapping');
+        if ((int)$m[1] < NCR_STACK_PORT_MIN || (int)$m[1] > NCR_STACK_PORT_MAX || (int)$m[2] < 1 || (int)$m[2] > 65535) refuse('published port outside the allowed range');
+        array_push($args, '-p', $port);
+    }
+    foreach ((array)($p['env'] ?? []) as $k => $v) {
+        if (!is_string($k) || !preg_match('/^[A-Z_][A-Z0-9_]*$/', $k) || !is_scalar($v) || str_contains((string)$v, "\0")) refuse('invalid environment variable');
+        array_push($args, '-e', "{$k}={$v}");
+    }
+    $args[] = $image;
+    return ncr_out(ncr_docker($args), false);
+}
+
+function cmd_docker_list(array $p): int {
+    $what = $p['what'] ?? '';
+    $fmt = match ($what) { 'images' => ['images'], 'volumes' => ['volume', 'ls'], 'networks' => ['network', 'ls'], default => refuse('invalid listing') };
+    return ncr_out(ncr_docker(array_merge($fmt, ['--format', '{{json .}}'])), false);
+}
+
+function cmd_docker_pull(array $p): int { return ncr_out(ncr_docker(['pull', v_image($p['image'] ?? null)], true), true); }
+
+function cmd_docker_rmi(array $p): int {
+    $id = $p['image'] ?? null;
+    if (!is_string($id) || !preg_match('~^[A-Za-z0-9][A-Za-z0-9:._\-/@]{0,200}$~', $id)) refuse('invalid image');
+    return ncr_out(ncr_docker(['rmi', $id]), false);
+}
+
+/** Docker Engine from get.docker.com (admin feature). Does NOT add www-data to the docker group: all docker access goes through this helper. */
+function cmd_docker_install(array $p): int {
+    $tmp = '/root/.ncr-get-docker.sh';
+    [$rc, $out] = ncr_run(['curl', '-fsSL', 'https://get.docker.com', '-o', $tmp]);
+    if ($rc !== 0) { echo $out; return $rc; }
+    chmod($tmp, 0700);
+    [$rc, $out] = ncr_run(['bash', $tmp], null, true, ['DEBIAN_FRONTEND' => 'noninteractive']);
+    @unlink($tmp);
+    if ($rc !== 0) return $rc;
+    return ncr_out(ncr_run(['systemctl', 'enable', '--now', 'docker'], null, true), true);
+}
+
+/** Create a stack directory owned by www-data (the panel keeps its compose file and notes there). */
+function cmd_docker_stack_prepare(array $p): int {
+    $dir = $p['dir'] ?? null;
+    if (!is_string($dir) || !preg_match('~^' . preg_quote(NCR_APPS_DIR, '~') . '/(admin|account-[0-9]{1,9})/[a-z0-9_-]{1,64}$~', $dir)) refuse('invalid stack directory');
+    $parent = dirname($dir);
+    foreach ([NCR_APPS_DIR, $parent, $dir] as $d) {
+        if (is_link($d)) refuse('stack directory is a symlink');
+        if (!is_dir($d) && !mkdir($d, 0750, true)) refuse('cannot create stack directory');
+        chown($d, 'www-data'); chgrp($d, 'www-data'); chmod($d, 0750);   // the panel keeps compose files here, so every level is the web user's
+    }
+    return 0;
+}
+
+// ---- compose stacks ----
+
+/** Stack policy. Returns ['services' => [...], 'limits' => [...]] or refuses with a message safe to show the customer. */
+function ncr_stack_policy(string $composeFile, string $stackDir, array $quota): array {
+    $yaml = (string)file_get_contents($composeFile);
+    if ($yaml === '' || strlen($yaml) > 65536) refuse('Compose file is empty or larger than 64 KB');
+    if (preg_match('/(^|[\s{,\[\'"-])(include|extends|env_file|secrets|configs|build|volumes_from|external_links|cgroup_parent|develop|provider)[\'"]?\s*:/im', $yaml, $m)) {
+        refuse("'{$m[2]}' is not allowed in customer compose files");
+    }
+    if (preg_match('/(?<!\$)(?:\$\$)*\$(?!\$)/', $yaml)) refuse('Variable substitution ($VAR / ${VAR}) is not allowed; write $$ for a literal $');
+
+    $proc = proc_open(['docker', 'compose', '-f', $composeFile, 'config', '--format', 'json'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+    $out = $err = '';
+    if (is_resource($proc)) {
+        $out = (string)stream_get_contents($pipes[1]); $err = (string)stream_get_contents($pipes[2]);
+        fclose($pipes[1]); fclose($pipes[2]); proc_close($proc);
+    }
+    $cfg = json_decode($out, true);
+    if (!is_array($cfg)) $out = $err;
+    if (!is_array($cfg) || !isset($cfg['services']) || !is_array($cfg['services']) || !$cfg['services']) {
+        $first = trim(strtok((string)$out, "\n") ?: 'invalid compose file');
+        refuse('Invalid compose file: ' . substr(preg_replace('/[^\x20-\x7E]/', '', $first), 0, 160));
+    }
+    $names = array_keys($cfg['services']);
+    if (count($names) > (int)$quota['max_containers']) refuse('Stack has ' . count($names) . " services; your container quota is {$quota['max_containers']}");
+
+    $deny = ['privileged', 'pid', 'ipc', 'uts', 'userns_mode', 'network_mode', 'cgroup', 'cap_add', 'devices', 'sysctls', 'runtime', 'gpus',
+             'volumes_from', 'external_links', 'oom_kill_disable', 'build', 'env_file', 'configs', 'secrets', 'provider', 'develop', 'pull_policy_dummy'];
+    $root = rtrim((string)(realpath($stackDir) ?: $stackDir), '/') . '/';
+    foreach ($cfg['services'] as $name => $svc) {
+        foreach ($deny as $k) {
+            if (isset($svc[$k]) && $svc[$k] !== false && $svc[$k] !== [] && $svc[$k] !== null) refuse("Service '$name': '$k' is not allowed");
+        }
+        if (empty($svc['image']) || !preg_match('~^[A-Za-z0-9][A-Za-z0-9._\-/:@]{0,200}$~', (string)$svc['image'])) refuse("Service '$name': a plain image name is required");
+        foreach ((array)($svc['security_opt'] ?? []) as $so) {
+            if (stripos((string)$so, 'no-new-privileges') !== 0) refuse("Service '$name': security_opt '$so' is not allowed");
+        }
+        foreach ((array)($svc['extra_hosts'] ?? []) as $eh) {
+            if (stripos(is_string($eh) ? $eh : json_encode($eh), 'host-gateway') !== false) refuse("Service '$name': extra_hosts to the host is not allowed");
+        }
+        if ((int)($svc['scale'] ?? 1) > 1 || (int)($svc['deploy']['replicas'] ?? 1) > 1) refuse("Service '$name': replicas/scale above 1 are not allowed");
+        foreach ((array)($svc['ports'] ?? []) as $pt) {
+            $pub = is_array($pt) ? (string)($pt['published'] ?? '') : '';
+            if ($pub === '') continue;
+            if (!ctype_digit($pub) || (int)$pub < NCR_STACK_PORT_MIN || (int)$pub > NCR_STACK_PORT_MAX) refuse("Service '$name': published port $pub must be between " . NCR_STACK_PORT_MIN . ' and ' . NCR_STACK_PORT_MAX);
+        }
+        foreach ((array)($svc['volumes'] ?? []) as $v) {
+            $type = is_array($v) ? ($v['type'] ?? '') : '';
+            if ($type === 'bind') {
+                $src = (string)($v['source'] ?? '');
+                $real = realpath($src) ?: $src;
+                if (strpos(rtrim($real, '/') . '/', $root) !== 0) refuse("Service '$name': bind mount '$src' is outside the stack folder");
+            } elseif ($type !== 'volume' && $type !== 'tmpfs') {
+                refuse("Service '$name': unsupported mount type");
+            }
+        }
+    }
+    foreach ((array)($cfg['volumes'] ?? []) as $vn => $vol) {
+        $vol = is_array($vol) ? $vol : [];
+        if (!empty($vol['external']) || !empty($vol['driver_opts']) || (!empty($vol['driver']) && $vol['driver'] !== 'local')) refuse("Volume '$vn': external volumes, drivers and driver options are not allowed");
+    }
+    foreach ((array)($cfg['networks'] ?? []) as $nn => $net) {
+        $net = is_array($net) ? $net : [];
+        if (!empty($net['external']) || !empty($net['driver_opts']) || (!empty($net['driver']) && $net['driver'] !== 'bridge')) refuse("Network '$nn': external networks, drivers and driver options are not allowed");
+    }
+    $n = max(1, count($names));
+    $mem = max(64, (int)floor(((int)$quota['max_memory_mb']) / $n));
+    $cpu = max(0.1, round(((float)$quota['max_cpus']) / $n, 2));
+    $limits = [];
+    foreach ($names as $nm) $limits[$nm] = ['mem_limit' => "{$mem}m", 'cpus' => $cpu, 'pids_limit' => 512, 'security_opt' => ['no-new-privileges:true']];
+    return ['services' => $names, 'limits' => $limits];
+}
+
+function ncr_quota(array $p): array {
+    $q = $p['quota'] ?? [];
+    return ['max_containers' => v_int($q['max_containers'] ?? 2, 1, 1000, 'container quota'),
+            'max_memory_mb'  => v_int($q['max_memory_mb'] ?? 512, 64, 1048576, 'memory quota'),
+            'max_cpus'       => (float)min(256, max(0.1, (float)($q['max_cpus'] ?? 1.0)))];
+}
+
+/**
+ * Copy the stack's compose file to a root-owned scratch directory, check THAT copy (so it cannot change between the
+ * check and the run) and return the docker compose arguments. Customer stacks are always checked; stacks in the
+ * admin area run unrestricted only if root created /etc/novacpx/allow-unrestricted-stacks.
+ */
+function ncr_stack_prepare_run(array $p, bool $needPolicy): array {
+    $dir = v_stack_dir($p['dir'] ?? null);
+    $src = "{$dir}/docker-compose.yml";
+    if (is_link($src) || !is_file($src)) refuse('compose file missing');
+    // The compose project name comes from the directory, never from a file the web user can edit.
+    preg_match('~/(admin|account-([0-9]+))/([a-z0-9_-]+)$~', $dir, $m);
+    $project = $m[1] === 'admin' ? v_project("novacpx-admin-{$m[3]}") : v_project("novacpx-a{$m[2]}-{$m[3]}");
+    $admin = $m[1] === 'admin';
+    $unrestricted = $admin && is_file(NCR_UNRESTRICTED_FLAG);
+
+    @mkdir(NCR_STATE_DIR . '/run', 0700, true);
+    $scratch = NCR_STATE_DIR . '/run/' . bin2hex(random_bytes(8));
+    if (!mkdir($scratch, 0700)) refuse('cannot create scratch directory');
+    $copy = "{$scratch}/docker-compose.yml";
+    copy($src, $copy);
+    $args = ['-f', $copy];
+    if ($needPolicy && !$unrestricted) {
+        try {
+            $r = ncr_stack_policy($copy, $dir, ncr_quota($p));
+        } catch (NcrRefused $e) { ncr_rrmdir($scratch); throw $e; }
+        file_put_contents("{$scratch}/docker-compose.novacpx-limits.yml", json_encode(['services' => $r['limits']], JSON_PRETTY_PRINT));
+        $args = array_merge($args, ['-f', "{$scratch}/docker-compose.novacpx-limits.yml"]);
+    } elseif (!$unrestricted) {
+        $lim = "{$dir}/docker-compose.novacpx-limits.yml";
+        if (is_file($lim) && !is_link($lim)) { copy($lim, "{$scratch}/docker-compose.novacpx-limits.yml"); $args = array_merge($args, ['-f', "{$scratch}/docker-compose.novacpx-limits.yml"]); }
+    }
+    $args = array_merge($args, ['-p', $project, '--project-directory', $dir]);
+    return [$args, $scratch];
+}
+
+function ncr_rrmdir(string $d): void {
+    foreach (glob("{$d}/{,.}*", GLOB_BRACE) ?: [] as $f) { if (basename($f) !== '.' && basename($f) !== '..') @unlink($f); }
+    @rmdir($d);
+}
+
+/** Check (and, for customers, write the limits file for) a stack. Returns the policy result as JSON. */
+function cmd_docker_stack_check(array $p): int {
+    $dir = v_stack_dir($p['dir'] ?? null);
+    $src = "{$dir}/docker-compose.yml";
+    if (is_link($src) || !is_file($src)) refuse('compose file missing');
+    $unrestricted = str_contains($dir, '/admin/') && is_file(NCR_UNRESTRICTED_FLAG);
+    if ($unrestricted) return ncr_json(['services' => [], 'limits' => [], 'unrestricted' => true]);
+    $r = ncr_stack_policy($src, $dir, ncr_quota($p));
+    $lim = "{$dir}/docker-compose.novacpx-limits.yml";
+    if (!is_link($lim)) {
+        file_put_contents($lim, json_encode(['services' => $r['limits']], JSON_PRETTY_PRINT));
+        chown($lim, 'www-data'); chgrp($lim, 'www-data'); chmod($lim, 0640);
+    }
+    return ncr_json($r);
+}
+
+function cmd_docker_compose(array $p): int {
+    $action = $p['action'] ?? '';
+    if (!in_array($action, ['up', 'down', 'down-v', 'pull', 'logs'], true)) refuse('invalid action');
+    [$args, $scratch] = ncr_stack_prepare_run($p, in_array($action, ['up', 'pull'], true));
+    try {
+        $tail = match ($action) { 'up' => ['up', '-d'], 'down' => ['down'], 'down-v' => ['down', '-v'], 'pull' => ['pull'], 'logs' => ['logs', '--tail=100'] };
+        $r = ncr_run(array_merge(['docker', 'compose'], $args, $tail), null, true);
+    } finally { ncr_rrmdir($scratch); }
+    return (int)$r[0];
+}
+
+/** `down` for stacks whose directory is gone or that predate project names: by project name only. */
+function cmd_docker_compose_down_project(array $p): int {
+    $project = v_project($p['project'] ?? null);
+    return ncr_out(ncr_run(['docker', 'compose', '-p', $project, 'down'], null, true), true);
+}
+
+// ───────────────────────── services ─────────────────────────
+
+function cmd_postqueue_flush(array $p): int { return ncr_out(ncr_run(['postqueue', '-f']), false); }
+
+// ───────────────────────── dispatch ─────────────────────────
+
+const NCR_COMMANDS = [
+    'user.add' => 'cmd_user_add', 'user.passwd' => 'cmd_user_passwd', 'user.lock' => 'cmd_user_lock', 'user.del' => 'cmd_user_del',
+    'home.init' => 'cmd_home_init', 'home.index' => 'cmd_home_index',
+    'dkim.genkey' => 'cmd_dkim_genkey', 'dkim.register' => 'cmd_dkim_register',
+    'web.apache.port' => 'cmd_web_apache_port', 'proxy.sync' => 'cmd_proxy_sync',
+    'web.vhost.write' => 'cmd_web_vhost_write', 'web.vhost.remove' => 'cmd_web_vhost_remove', 'web.ssl.store' => 'cmd_web_ssl_store',
+    'php.pool.write' => 'cmd_php_pool_write', 'php.pool.remove' => 'cmd_php_pool_remove', 'php.pecl' => 'cmd_php_pecl',
+    'mail.sync' => 'cmd_mail_sync', 'dns.zone' => 'cmd_dns_zone', 'dns.remove' => 'cmd_dns_remove', 'pkg.apt' => 'cmd_pkg_apt',
+    'fail2ban' => 'cmd_fail2ban', 'fail2ban.defaults' => 'cmd_fail2ban_defaults', 'postqueue.flush' => 'cmd_postqueue_flush',
+    'docker.status' => 'cmd_docker_status', 'docker.prune' => 'cmd_docker_prune', 'docker.states' => 'cmd_docker_states',
+    'docker.action' => 'cmd_docker_action', 'docker.rm' => 'cmd_docker_rm', 'docker.logs' => 'cmd_docker_logs', 'docker.inspect' => 'cmd_docker_inspect',
+    'docker.run' => 'cmd_docker_run', 'docker.list' => 'cmd_docker_list', 'docker.pull' => 'cmd_docker_pull', 'docker.rmi' => 'cmd_docker_rmi',
+    'docker.install' => 'cmd_docker_install', 'docker.stack.prepare' => 'cmd_docker_stack_prepare', 'docker.stack.check' => 'cmd_docker_stack_check',
+    'docker.compose' => 'cmd_docker_compose', 'docker.compose.down_project' => 'cmd_docker_compose_down_project',
+];
+
+function ncr_main(array $argv): int {
+    if (PHP_SAPI !== 'cli') return 1;
+    if (posix_geteuid() !== 0) { fwrite(STDERR, "novacpx-root: must run as root (through sudo)\n"); return 64; }
+    // Only root itself or the web user (through sudo) may use this.
+    $sudoUid = getenv('SUDO_UID');
+    if ($sudoUid !== false && $sudoUid !== '0') {
+        $www = posix_getpwnam('www-data');
+        if (!$www || (int)$sudoUid !== $www['uid']) { fwrite(STDERR, "novacpx-root: caller not permitted\n"); return 64; }
+    }
+    umask(022);
+    $cmd = $argv[1] ?? '';
+    if (!isset(NCR_COMMANDS[$cmd]) || count($argv) !== 2) { fwrite(STDERR, "novacpx-root: unknown command\n"); return 64; }
+    $raw = stream_get_contents(STDIN, 4194305);
+    if ($raw !== false && strlen($raw) > 4194304) { fwrite(STDERR, "novacpx-root: request too large\n"); return 64; }
+    $params = $raw === '' || $raw === false ? [] : json_decode($raw, true);
+    if (!is_array($params)) { fwrite(STDERR, "novacpx-root: parameters must be a JSON object\n"); return 64; }
+    try {
+        $rc = (NCR_COMMANDS[$cmd])($params);
+        return $rc;
+    } catch (NcrRefused $e) {
+        fwrite(STDERR, 'novacpx-root: refused: ' . $e->getMessage() . "\n");
+        return 64;
+    } catch (Throwable $e) {
+        fwrite(STDERR, 'novacpx-root: error: ' . get_class($e) . ': ' . $e->getMessage() . "\n");
+        return 70;
+    }
+}
+
+if (!defined('NOVACPX_ROOT_LIB')) exit(ncr_main($argv));
