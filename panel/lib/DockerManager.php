@@ -131,14 +131,20 @@ SH;
         $count = (int)$this->db->fetchOne("SELECT COUNT(*) as c FROM docker_containers WHERE account_id=?", [$accountId])['c'];
         if ($count >= $quota['max_containers']) throw new RuntimeException("Container quota exceeded ({$quota['max_containers']} max)");
 
-        $memMb  = min((int)($opts['memory_mb'] ?? 256), $quota['max_memory_mb']);
-        $cpus   = min((float)($opts['cpus'] ?? 0.5), (float)$quota['max_cpus']);
+        // 0 / negative means "unlimited" to Docker, so clamp to a real floor as well as the quota ceiling.
+        $memMb  = max(32, min((int)($opts['memory_mb'] ?? 256), (int)$quota['max_memory_mb']));
+        $cpus   = max(0.1, min((float)($opts['cpus'] ?? 0.5), (float)$quota['max_cpus']));
+        $image  = $this->yqImage($image);
         $safeName = 'novacpx-' . $account['username'] . '-' . preg_replace('/[^a-z0-9_-]/', '', strtolower($name));
 
         $portArgs = '';
         if (!empty($opts['ports'])) {
             foreach ((array)$opts['ports'] as $p) {
-                if (preg_match('/^\d+:\d+$/', $p)) $portArgs .= " -p " . escapeshellarg($p);
+                if (!is_string($p) || !preg_match('/^(\d{1,5}):(\d{1,5})$/', $p, $pm)) continue;
+                if ((int)$pm[1] < self::STACK_PORT_MIN || (int)$pm[1] > self::STACK_PORT_MAX || (int)$pm[2] < 1 || (int)$pm[2] > 65535) {
+                    throw new RuntimeException("Published port {$pm[1]} must be between " . self::STACK_PORT_MIN . " and " . self::STACK_PORT_MAX);
+                }
+                $portArgs .= " -p " . escapeshellarg($p);
             }
         }
         $envArgs = '';
@@ -149,7 +155,7 @@ SH;
         }
 
         $cmd = "sudo docker run -d --name " . escapeshellarg($safeName)
-             . " --memory={$memMb}m --cpus={$cpus}"
+             . " --memory={$memMb}m --cpus={$cpus} --pids-limit=512 --security-opt=no-new-privileges:true"
              . " --restart=unless-stopped"
              . $portArgs . $envArgs
              . " " . escapeshellarg($image) . " 2>&1";
@@ -230,11 +236,17 @@ SH;
         $allowed = ['up','down','pull','logs'];
         if (!in_array($action, $allowed)) throw new RuntimeException("Invalid action");
 
+        // Customer stacks are re-checked every time they are started or pulled (down/logs always work so a refused stack can be torn down).
+        if ($stack['account_id'] && in_array($action, ['up', 'pull'], true) && !is_file("{$dir}/.novacpx-trusted")) {
+            $this->enforceStackPolicy((int)$stack['account_id'], $dir);
+        }
+        $args = self::composeArgs($stack);
+
         $cmd = match($action) {
-            'up'   => "sudo docker compose -f " . escapeshellarg("{$dir}/docker-compose.yml") . " up -d 2>&1",
-            'down' => "sudo docker compose -f " . escapeshellarg("{$dir}/docker-compose.yml") . " down 2>&1",
-            'pull' => "sudo docker compose -f " . escapeshellarg("{$dir}/docker-compose.yml") . " pull 2>&1",
-            'logs' => "sudo docker compose -f " . escapeshellarg("{$dir}/docker-compose.yml") . " logs --tail=100 2>&1",
+            'up'   => "sudo docker compose {$args} up -d 2>&1",
+            'down' => "sudo docker compose {$args} down 2>&1",
+            'pull' => "sudo docker compose {$args} pull 2>&1",
+            'logs' => "sudo docker compose {$args} logs --tail=100 2>&1",
         };
         $out = shell_exec($cmd) ?? '';
         $status = match($action) { 'up' => 'running', 'down' => 'stopped', default => $stack['status'] };
@@ -242,7 +254,7 @@ SH;
         return trim($out);
     }
 
-    public function createStack(?int $accountId, string $name, string $composeYaml): array {
+    public function createStack(?int $accountId, string $name, string $composeYaml, bool $trusted = false): array {
         $safeName = preg_replace('/[^a-z0-9_-]/', '', strtolower($name));
         $dir = "{$this->appsDir}/" . ($accountId ? "account-{$accountId}" : 'admin') . "/{$safeName}";
         if (!is_dir($dir)) {
@@ -251,7 +263,23 @@ SH;
             shell_exec('sudo chmod 750 ' . escapeshellarg($dir) . ' 2>/dev/null');
         }
         if (!is_dir($dir)) throw new RuntimeException("Failed to create stack directory: {$dir}");
+        if ($accountId && (is_file("{$dir}/docker-compose.yml") || $this->db->fetchOne("SELECT id FROM docker_compose_stacks WHERE account_id=? AND name=?", [$accountId, $safeName]))) {
+            throw new RuntimeException("A stack named '{$safeName}' already exists for this account");
+        }
         file_put_contents("{$dir}/docker-compose.yml", $composeYaml);
+        if ($accountId && $trusted) {
+            file_put_contents("{$dir}/.novacpx-trusted", "created by an administrator\n");   // admin decision: not restricted
+            file_put_contents("{$dir}/.novacpx-project", "novacpx-a{$accountId}-{$safeName}");
+        } elseif ($accountId) {
+            try {
+                $this->enforceStackPolicy((int)$accountId, $dir);
+            } catch (RuntimeException $e) {
+                @unlink("{$dir}/docker-compose.yml"); @unlink("{$dir}/docker-compose.novacpx-limits.yml"); @rmdir($dir);
+                throw $e;
+            }
+            // Own compose project per tenant+stack, so two customers can never share networks or volumes by picking the same stack name.
+            file_put_contents("{$dir}/.novacpx-project", "novacpx-a{$accountId}-{$safeName}");
+        }
         $id = (int)$this->db->insert(
             "INSERT INTO docker_compose_stacks (account_id, name, stack_dir, compose_file, status) VALUES (?,?,?,?,'pending')",
             [$accountId, $safeName, $dir, $composeYaml]
@@ -274,9 +302,146 @@ SH;
         // Bring down first
         $dir = $stack['stack_dir'];
         if (is_dir($dir) && is_file("{$dir}/docker-compose.yml")) {
-            shell_exec("sudo docker compose -f " . escapeshellarg("{$dir}/docker-compose.yml") . " down 2>&1");
+            shell_exec("sudo docker compose " . self::composeArgs($stack) . " down 2>&1");
         }
         $this->db->execute("DELETE FROM docker_compose_stacks WHERE id=?", [$stackId]);
+    }
+
+    // ── Customer stack policy ─────────────────────────────────────────────────
+    // Anything an account holder deploys (their own compose file, or a catalog app launched for their account)
+    // runs as root through `sudo docker compose`, so it is checked against an allow-list before every up/pull:
+    // no privileged/host namespaces/devices/capabilities, no bind mounts outside the stack folder, no docker.sock,
+    // no host networking, no external networks/volumes, published ports only in 10000-60000, no file includes.
+    // Admin-owned stacks (account_id NULL) are not restricted.
+
+    public const STACK_PORT_MIN = 10000;
+    public const STACK_PORT_MAX = 60000;
+
+    /**
+     * Catalog parameters (passwords, users, keys) are pasted into YAML text, so anything that could change the
+     * document's structure (newlines, quotes, #, :, spaces, braces, $ ...) is refused instead of silently altered.
+     */
+    private function yq(string $v): string {
+        if (!preg_match('/^[A-Za-z0-9._~+=-]{1,128}$/', $v)) {
+            throw new RuntimeException('Passwords, user names and keys may only contain letters, digits and . _ ~ + = - (max 128 characters)');
+        }
+        return $v;
+    }
+
+    private function yqImage(string $image): string {
+        if (!preg_match('~^[A-Za-z0-9][A-Za-z0-9._\-/:@]{0,200}$~', $image)) throw new RuntimeException("Invalid image name");
+        return $image;
+    }
+
+    /** -f/-p arguments for a stack: its compose file, the server-written limits file (customer stacks) and a tenant-unique project name (new stacks). */
+    public static function composeArgs(array $stack): string {
+        $dir  = $stack['stack_dir'];
+        $args = '-f ' . escapeshellarg("{$dir}/docker-compose.yml");
+        if (is_file("{$dir}/docker-compose.novacpx-limits.yml")) $args .= ' -f ' . escapeshellarg("{$dir}/docker-compose.novacpx-limits.yml");
+        if (is_file("{$dir}/.novacpx-project")) {
+            $p = preg_replace('/[^a-z0-9_-]/', '', strtolower(trim((string)file_get_contents("{$dir}/.novacpx-project"))));
+            if ($p !== '') $args .= ' -p ' . escapeshellarg($p);
+        }
+        return $args;
+    }
+
+    /**
+     * Pure policy check. Returns ['services' => [names], 'limits' => [name => [...]]] or throws RuntimeException with a
+     * message safe to show the customer. $composeFile must be an existing file; docker is only asked to normalise it.
+     */
+    public static function checkStackPolicy(string $composeFile, string $stackDir, array $quota): array {
+        $yaml = (string)file_get_contents($composeFile);
+        if ($yaml === '' || strlen($yaml) > 65536) throw new RuntimeException('Compose file is empty or larger than 64 KB');
+        // Refused on the raw text, before docker parses (and could read) anything.
+        if (preg_match('/(^|[\s{,\[\'"-])(include|extends|env_file|secrets|configs|build|volumes_from|external_links|cgroup_parent|develop|provider)[\'"]?\s*:/im', $yaml, $m)) {
+            throw new RuntimeException("'{$m[2]}' is not allowed in customer compose files");
+        }
+        if (preg_match('/(?<!\$)(?:\$\$)*\$(?!\$)/', $yaml)) {
+            throw new RuntimeException('Variable substitution ($VAR / ${VAR}) is not allowed; write $$ for a literal $');
+        }
+
+        $proc = proc_open(['sudo', 'docker', 'compose', '-f', $composeFile, 'config', '--format', 'json'],
+                          [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+        $out = $err = '';
+        if (is_resource($proc)) {
+            $out = (string)stream_get_contents($pipes[1]); $err = (string)stream_get_contents($pipes[2]);
+            fclose($pipes[1]); fclose($pipes[2]); proc_close($proc);
+        }
+        $cfg = json_decode($out, true);
+        if (!is_array($cfg)) $out = $err;
+        if (!is_array($cfg) || !isset($cfg['services']) || !is_array($cfg['services']) || !$cfg['services']) {
+            $first = trim(strtok((string)$out, "\n") ?: 'invalid compose file');
+            throw new RuntimeException('Invalid compose file: ' . substr(preg_replace('/[^\x20-\x7E]/', '', $first), 0, 160));
+        }
+        $names = array_keys($cfg['services']);
+        if (count($names) > (int)$quota['max_containers']) {
+            throw new RuntimeException("Stack has " . count($names) . " services; your container quota is {$quota['max_containers']}");
+        }
+
+        $deny = ['privileged','pid','ipc','uts','userns_mode','network_mode','cgroup','cap_add','devices','sysctls','runtime','gpus',
+                 'volumes_from','external_links','oom_kill_disable','build','env_file','configs','secrets','provider','develop','pull_policy_dummy'];
+        foreach ($cfg['services'] as $name => $svc) {
+            foreach ($deny as $k) {
+                if (isset($svc[$k]) && $svc[$k] !== false && $svc[$k] !== [] && $svc[$k] !== null) throw new RuntimeException("Service '$name': '$k' is not allowed");
+            }
+            if (empty($svc['image']) || !preg_match('~^[A-Za-z0-9][A-Za-z0-9._\-/:@]{0,200}$~', (string)$svc['image'])) {
+                throw new RuntimeException("Service '$name': a plain image name is required");
+            }
+            foreach ((array)($svc['security_opt'] ?? []) as $so) {
+                if (stripos((string)$so, 'no-new-privileges') !== 0) throw new RuntimeException("Service '$name': security_opt '$so' is not allowed");
+            }
+            foreach ((array)($svc['extra_hosts'] ?? []) as $eh) {
+                if (stripos(is_string($eh) ? $eh : json_encode($eh), 'host-gateway') !== false) throw new RuntimeException("Service '$name': extra_hosts to the host is not allowed");
+            }
+            if ((int)($svc['scale'] ?? 1) > 1 || (int)($svc['deploy']['replicas'] ?? 1) > 1) throw new RuntimeException("Service '$name': replicas/scale above 1 are not allowed");
+            foreach ((array)($svc['ports'] ?? []) as $p) {
+                $pub = is_array($p) ? (string)($p['published'] ?? '') : '';
+                if ($pub === '') continue;                                     // container-only port: Docker picks a free host port
+                if (!ctype_digit($pub) || (int)$pub < self::STACK_PORT_MIN || (int)$pub > self::STACK_PORT_MAX) {
+                    throw new RuntimeException("Service '$name': published port $pub must be between " . self::STACK_PORT_MIN . " and " . self::STACK_PORT_MAX);
+                }
+            }
+            $root = rtrim((string)realpath($stackDir) ?: $stackDir, '/') . '/';
+            foreach ((array)($svc['volumes'] ?? []) as $v) {
+                $type = is_array($v) ? ($v['type'] ?? '') : '';
+                if ($type === 'bind') {
+                    $src = (string)($v['source'] ?? '');
+                    $real = realpath($src) ?: $src;
+                    if (strpos(rtrim($real, '/') . '/', $root) !== 0) throw new RuntimeException("Service '$name': bind mount '$src' is outside the stack folder");
+                } elseif ($type !== 'volume' && $type !== 'tmpfs') {
+                    throw new RuntimeException("Service '$name': unsupported mount type");
+                }
+            }
+        }
+        foreach ((array)($cfg['volumes'] ?? []) as $vn => $vol) {
+            $vol = is_array($vol) ? $vol : [];
+            if (!empty($vol['external']) || !empty($vol['driver_opts']) || (!empty($vol['driver']) && $vol['driver'] !== 'local')) {
+                throw new RuntimeException("Volume '$vn': external volumes, drivers and driver options are not allowed");
+            }
+        }
+        foreach ((array)($cfg['networks'] ?? []) as $nn => $net) {
+            $net = is_array($net) ? $net : [];
+            if (!empty($net['external']) || !empty($net['driver_opts']) || (!empty($net['driver']) && $net['driver'] !== 'bridge')) {
+                throw new RuntimeException("Network '$nn': external networks, drivers and driver options are not allowed");
+            }
+        }
+
+        $n = max(1, count($names));
+        $mem = max(64, (int)floor(((int)$quota['max_memory_mb']) / $n));
+        $cpu = max(0.1, round(((float)$quota['max_cpus']) / $n, 2));
+        $limits = [];
+        foreach ($names as $name) {
+            $limits[$name] = ['mem_limit' => "{$mem}m", 'cpus' => $cpu, 'pids_limit' => 512, 'security_opt' => ['no-new-privileges:true']];
+        }
+        return ['services' => $names, 'limits' => $limits];
+    }
+
+    /** Validate a customer stack on disk and (re)write the server-controlled limits file next to it. */
+    private function enforceStackPolicy(int $accountId, string $dir): void {
+        $account = $this->db->fetchOne("SELECT u.id AS user_id FROM accounts a JOIN users u ON u.id=a.user_id WHERE a.id=?", [$accountId]);
+        if (!$account) throw new RuntimeException("Account not found");
+        $r = self::checkStackPolicy("{$dir}/docker-compose.yml", $dir, $this->getQuota((int)$account['user_id']));
+        file_put_contents("{$dir}/docker-compose.novacpx-limits.yml", json_encode(['services' => $r['limits']], JSON_PRETTY_PRINT));
     }
 
     // ── Quotas ────────────────────────────────────────────────────────────────
@@ -1595,7 +1760,7 @@ SH;
         ];
     }
 
-    public function launchFromCatalog(int $accountId, string $appKey, array $params): array {
+    public function launchFromCatalog(int $accountId, string $appKey, array $params, bool $trusted = false): array {
         $catalog = self::getCatalog();
         if (!isset($catalog[$appKey])) throw new RuntimeException("Unknown app: $appKey");
 
@@ -1603,23 +1768,23 @@ SH;
         if (!$domain) throw new RuntimeException("domain is required");
 
         $yaml = $this->generateComposeYaml($appKey, $domain, $params);
-        $stack = $this->createStack($accountId, "{$appKey}-{$domain}", $yaml);
+        $stack = $this->createStack($accountId, "{$appKey}-{$domain}", $yaml, $trusted);
 
         // Pull images and start stack in background (image pulls can take minutes)
         $dir    = $stack['dir'];
         $stackId = (int)$stack['id'];
         $logFile = escapeshellarg("/tmp/novacpx-stack-{$stackId}.log");
-        $compose = escapeshellarg("{$dir}/docker-compose.yml");
-        shell_exec("nohup sudo docker compose -f {$compose} up -d > {$logFile} 2>&1 &");
+        $composeArgs = self::composeArgs(['stack_dir' => $dir]);
+        shell_exec("nohup sudo docker compose {$composeArgs} up -d > {$logFile} 2>&1 &");
         $this->db->execute("UPDATE docker_compose_stacks SET status='pending' WHERE id=?", [$stackId]);
         novacpx_log('info', "DockerManager: launching {$appKey} for account {$accountId} on {$domain} (async)");
         return ['stack_id' => $stackId, 'dir' => $dir, 'output' => 'Launching in background — refresh in a moment to see status'];
     }
 
     private function generateComposeYaml(string $appKey, string $domain, array $p): string {
-        $dbPass    = $p['db_pass']    ?? bin2hex(random_bytes(8));
-        $adminPass = $p['admin_pass'] ?? bin2hex(random_bytes(8));
-        $adminUser = $p['admin_user'] ?? 'admin';
+        $dbPass    = $this->yq((string)($p['db_pass']    ?? bin2hex(random_bytes(8))));
+        $adminPass = $this->yq((string)($p['admin_pass'] ?? bin2hex(random_bytes(8))));
+        $adminUser = $this->yq((string)($p['admin_user'] ?? 'admin'));
 
         return match($appKey) {
             'wordpress' => "version: '3.8'\nservices:\n  db:\n    image: mariadb:10.11\n    restart: unless-stopped\n    environment:\n      MYSQL_ROOT_PASSWORD: {$dbPass}\n      MYSQL_DATABASE: wordpress\n      MYSQL_USER: wordpress\n      MYSQL_PASSWORD: {$dbPass}\n    volumes:\n      - db_data:/var/lib/mysql\n  wordpress:\n    image: wordpress:latest\n    restart: unless-stopped\n    depends_on: [db]\n    environment:\n      WORDPRESS_DB_HOST: db\n      WORDPRESS_DB_NAME: wordpress\n      WORDPRESS_DB_USER: wordpress\n      WORDPRESS_DB_PASSWORD: {$dbPass}\n    volumes:\n      - wp_data:/var/www/html\n    labels:\n      - 'novacpx.domain={$domain}'\nvolumes:\n  db_data:\n  wp_data:\n",
@@ -1632,10 +1797,10 @@ SH;
 
             'matomo'    => "version: '3.8'\nservices:\n  db:\n    image: mariadb:10.11\n    restart: unless-stopped\n    environment:\n      MYSQL_ROOT_PASSWORD: {$dbPass}\n      MYSQL_DATABASE: matomo\n      MYSQL_USER: matomo\n      MYSQL_PASSWORD: {$dbPass}\n    volumes:\n      - db_data:/var/lib/mysql\n  matomo:\n    image: matomo:latest\n    restart: unless-stopped\n    depends_on: [db]\n    environment:\n      MATOMO_DATABASE_HOST: db\n      MATOMO_DATABASE_DBNAME: matomo\n      MATOMO_DATABASE_USERNAME: matomo\n      MATOMO_DATABASE_PASSWORD: {$dbPass}\n    volumes:\n      - matomo_data:/var/www/html\n    labels:\n      - 'novacpx.domain={$domain}'\nvolumes:\n  db_data:\n  matomo_data:\n",
 
-            'vaultwarden' => "version: '3.8'\nservices:\n  vaultwarden:\n    image: vaultwarden/server:latest\n    restart: unless-stopped\n    environment:\n      DOMAIN: https://{$domain}\n      ADMIN_TOKEN: " . ($p['admin_token'] ?? bin2hex(random_bytes(16))) . "\n      SIGNUPS_ALLOWED: 'false'\n    volumes:\n      - vw_data:/data\n    labels:\n      - 'novacpx.domain={$domain}'\nvolumes:\n  vw_data:\n",
+            'vaultwarden' => "version: '3.8'\nservices:\n  vaultwarden:\n    image: vaultwarden/server:latest\n    restart: unless-stopped\n    environment:\n      DOMAIN: https://{$domain}\n      ADMIN_TOKEN: " . $this->yq((string)($p['admin_token'] ?? bin2hex(random_bytes(16)))) . "\n      SIGNUPS_ALLOWED: 'false'\n    volumes:\n      - vw_data:/data\n    labels:\n      - 'novacpx.domain={$domain}'\nvolumes:\n  vw_data:\n",
 
             'nodejs', 'flask' => (function() use ($p, $domain, $appKey) {
-                $image = $p['image'] ?? ($appKey === 'nodejs' ? 'node:20-alpine' : 'python:3.12-slim');
+                $image = $this->yqImage((string)($p['image'] ?? ($appKey === 'nodejs' ? 'node:20-alpine' : 'python:3.12-slim')));
                 $port  = (int)($p['port'] ?? 3000);
                 return "version: '3.8'\nservices:\n  app:\n    image: " . $image . "\n    restart: unless-stopped\n    ports:\n      - '{$port}'\n    labels:\n      - 'novacpx.domain={$domain}'\n";
             })(),
@@ -1646,7 +1811,7 @@ SH;
 
             'portainer' => "version: '3.8'\nservices:\n  portainer:\n    image: portainer/portainer-ce:latest\n    restart: unless-stopped\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n      - portainer_data:/data\n    labels:\n      - 'novacpx.domain={$domain}'\nvolumes:\n  portainer_data:\n",
 
-            'minio' => "version: '3.8'\nservices:\n  minio:\n    image: minio/minio:latest\n    restart: unless-stopped\n    command: server /data --console-address ':9001'\n    environment:\n      MINIO_ROOT_USER: " . ($p['access_key'] ?? 'minioadmin') . "\n      MINIO_ROOT_PASSWORD: " . ($p['secret_key'] ?? bin2hex(random_bytes(8))) . "\n    volumes:\n      - minio_data:/data\n    labels:\n      - 'novacpx.domain={$domain}'\nvolumes:\n  minio_data:\n",
+            'minio' => "version: '3.8'\nservices:\n  minio:\n    image: minio/minio:latest\n    restart: unless-stopped\n    command: server /data --console-address ':9001'\n    environment:\n      MINIO_ROOT_USER: " . $this->yq((string)($p['access_key'] ?? 'minioadmin')) . "\n      MINIO_ROOT_PASSWORD: " . $this->yq((string)($p['secret_key'] ?? bin2hex(random_bytes(8)))) . "\n    volumes:\n      - minio_data:/data\n    labels:\n      - 'novacpx.domain={$domain}'\nvolumes:\n  minio_data:\n",
 
             'n8n' => "version: '3.8'\nservices:\n  n8n:\n    image: n8nio/n8n:latest\n    restart: unless-stopped\n    environment:\n      N8N_HOST: {$domain}\n      N8N_PROTOCOL: https\n      WEBHOOK_URL: https://{$domain}/\n      DB_TYPE: sqlite\n    volumes:\n      - n8n_data:/home/node/.n8n\n    labels:\n      - 'novacpx.domain={$domain}'\nvolumes:\n  n8n_data:\n",
 
@@ -1662,7 +1827,7 @@ SH;
 
             'photoprism' => "version: '3.8'\nservices:\n  db:\n    image: mariadb:10.11\n    restart: unless-stopped\n    environment:\n      MYSQL_ROOT_PASSWORD: {$dbPass}\n      MYSQL_DATABASE: photoprism\n      MYSQL_USER: photoprism\n      MYSQL_PASSWORD: {$dbPass}\n    volumes:\n      - db_data:/var/lib/mysql\n  photoprism:\n    image: photoprism/photoprism:latest\n    restart: unless-stopped\n    depends_on: [db]\n    environment:\n      PHOTOPRISM_ADMIN_PASSWORD: {$adminPass}\n      PHOTOPRISM_SITE_URL: https://{$domain}/\n      PHOTOPRISM_DATABASE_DRIVER: mysql\n      PHOTOPRISM_DATABASE_SERVER: db:3306\n      PHOTOPRISM_DATABASE_NAME: photoprism\n      PHOTOPRISM_DATABASE_USER: photoprism\n      PHOTOPRISM_DATABASE_PASSWORD: {$dbPass}\n    volumes:\n      - photoprism_data:/photoprism/storage\n      - photoprism_originals:/photoprism/originals\n    labels:\n      - 'novacpx.domain={$domain}'\nvolumes:\n  db_data:\n  photoprism_data:\n  photoprism_originals:\n",
 
-            'meilisearch' => "version: '3.8'\nservices:\n  meilisearch:\n    image: getmeili/meilisearch:latest\n    restart: unless-stopped\n    environment:\n      MEILI_MASTER_KEY: " . ($p['master_key'] ?? bin2hex(random_bytes(16))) . "\n      MEILI_ENV: production\n    volumes:\n      - meili_data:/meili_data\n    labels:\n      - 'novacpx.domain={$domain}'\nvolumes:\n  meili_data:\n",
+            'meilisearch' => "version: '3.8'\nservices:\n  meilisearch:\n    image: getmeili/meilisearch:latest\n    restart: unless-stopped\n    environment:\n      MEILI_MASTER_KEY: " . $this->yq((string)($p['master_key'] ?? bin2hex(random_bytes(16)))) . "\n      MEILI_ENV: production\n    volumes:\n      - meili_data:/meili_data\n    labels:\n      - 'novacpx.domain={$domain}'\nvolumes:\n  meili_data:\n",
 
             'wikijs' => "version: '3.8'\nservices:\n  db:\n    image: postgres:16-alpine\n    restart: unless-stopped\n    environment:\n      POSTGRES_DB: wiki\n      POSTGRES_USER: wiki\n      POSTGRES_PASSWORD: {$dbPass}\n    volumes:\n      - db_data:/var/lib/postgresql/data\n  wiki:\n    image: ghcr.io/requarks/wiki:2\n    restart: unless-stopped\n    depends_on: [db]\n    environment:\n      DB_TYPE: postgres\n      DB_HOST: db\n      DB_PORT: '5432'\n      DB_USER: wiki\n      DB_PASS: {$dbPass}\n      DB_NAME: wiki\n    labels:\n      - 'novacpx.domain={$domain}'\nvolumes:\n  db_data:\n",
 
