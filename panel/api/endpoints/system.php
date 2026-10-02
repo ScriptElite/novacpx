@@ -359,6 +359,7 @@ BASH;
 
     // ── Server Stats ──────────────────────────────────────────────────────────
     'stats' => (function() use ($db) {
+        Auth::getInstance()->require('admin');
         // CPU/load
         $load   = sys_getloadavg();
         $cpuPct = round(($load[0] / max(1, (int)shell_exec('nproc'))) * 100, 1);

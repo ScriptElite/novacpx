@@ -1,7 +1,7 @@
 <?php
 /**
  * WHMCS provisioning bridge (#22b)
- * Auth: X-WHMCS-Key header or whmcs_key GET param
+ * Auth: X-WHMCS-Key header only (a query-string key would end up in access logs)
  * Actions: create, suspend, unsuspend, terminate, info
  */
 require_once NOVACPX_LIB . '/AccountManager.php';
@@ -14,7 +14,7 @@ $enabled   = (bool)($db->fetchOne("SELECT value FROM settings WHERE `key`='whmcs
 
 if (!$enabled || !$storedKey) Response::error('WHMCS integration is disabled', 403);
 
-$receivedKey = $_SERVER['HTTP_X_WHMCS_KEY'] ?? $_GET['whmcs_key'] ?? '';
+$receivedKey = $_SERVER['HTTP_X_WHMCS_KEY'] ?? '';
 if (!hash_equals($storedKey, $receivedKey)) Response::error('Invalid API key', 401);
 
 $body = json_decode(file_get_contents('php://input'), true) ?? [];

@@ -18,9 +18,10 @@ match ($action) {
             $ip     = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
             $port   = (int)($_SERVER['SERVER_PORT'] ?? 0);
             $portal = $port === PORT_ADMIN ? 'admin' : ($port === PORT_RESELLER ? 'reseller' : ($port === PORT_WEBMAIL ? 'webmail' : 'user'));
-            $logLine = date('Y-m-d H:i:s') . " FAILED LOGIN from {$ip} [{$portal}] user:{$username}\n";
+            $logUser = substr(preg_replace('/[^\x20-\x7E]/', '?', $username), 0, 64);   // no newlines/control chars
+            $logLine = date('Y-m-d H:i:s') . " FAILED LOGIN from {$ip} [{$portal}] user:{$logUser}\n";
             @file_put_contents('/var/log/novacpx/access.log', $logLine, FILE_APPEND | LOCK_EX);
-            novacpx_log('warn', "Failed login for '$username' from $ip");
+            novacpx_log('warn', "Failed login for '$logUser' from $ip");
             Response::error('Invalid credentials', 401);
         }
         $user = $auth->user();
