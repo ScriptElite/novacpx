@@ -650,6 +650,10 @@ log "Fail2Ban configured"
 bash /opt/novacpx-src/deploy/install-root-helper.sh --lockdown >> "$LOG" 2>&1
 log "Privileged helper and sudoers installed"
 
+# Auto-deploy: poll origin/main every minute and deploy new commits (no inbound webhook needed)
+bash /opt/novacpx-src/deploy/install-autodeploy.sh >> "$LOG" 2>&1
+log "Auto-deploy installed"
+
 # ── Cron jobs ─────────────────────────────────────────────────────────────────
 step "Setting Up Cron Jobs"
 cat > /etc/cron.d/novacpx <<CRON
