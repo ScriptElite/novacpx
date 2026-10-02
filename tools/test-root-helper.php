@@ -105,6 +105,12 @@ $cases = [
     'dns remove bad domain'       => fn() => cmd_dns_remove(['domain' => '../../etc/passwd']),
     'proxy bad upstream'          => fn() => cmd_proxy_sync(['hosts' => [['domain' => 'a.com', 'upstream' => 'http://x; include /etc/passwd']]]),
     'apache port bad'             => fn() => cmd_web_apache_port(['from' => 'a', 'to' => 80]),
+    'dbengine bad engine'         => fn() => cmd_dbengine(['engine' => 'sqlite;id', 'action' => 'install']),
+    'dbengine bad action'         => fn() => cmd_dbengine(['engine' => 'mysql', 'action' => 'purge']),
+    'db tool bad tool'            => fn() => cmd_db_tool(['tool' => 'bash', 'action' => 'install']),
+    'db tool bad action'          => fn() => cmd_db_tool(['tool' => 'adminer', 'action' => 'exec']),
+    'proxy local bad action'      => fn() => cmd_proxy_local(['action' => 'format']),
+    'proxy local low port'        => fn() => cmd_proxy_local(['action' => 'enable', 'apache_port' => 80]),
     'ssl store garbage'           => fn() => cmd_web_ssl_store(['username' => 'zz_nobody_here', 'cert' => 'x', 'key' => 'y']),
 ];
 foreach ($cases as $name => $f) t("refused: $name", refused($f));

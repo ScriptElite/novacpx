@@ -34,6 +34,18 @@ class Root {
         return self::exec($cmd, $params, $onLine, $unused);
     }
 
+    /** Run and yield every output line as it is produced (for the generator-based SSE endpoints). */
+    public static function lines(string $cmd, array $params = []): \Generator {
+        $proc = proc_open(['sudo', '-n', self::HELPER, $cmd], [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['redirect', 1]], $pipes,
+                          null, ['PATH' => '/usr/sbin:/usr/bin:/sbin:/bin']);
+        if (!is_resource($proc)) { yield "cannot start the privileged helper\n"; return 127; }
+        fwrite($pipes[0], json_encode($params, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+        fclose($pipes[0]);
+        while (($line = fgets($pipes[1])) !== false) yield $line;
+        fclose($pipes[1]);
+        return proc_close($proc);
+    }
+
     /** The shell command line that runs a helper command with these parameters (for code that streams through a shell closure). */
     public static function shellCommand(string $cmd, array $params = []): string {
         return 'printf %s ' . escapeshellarg(json_encode($params, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE))

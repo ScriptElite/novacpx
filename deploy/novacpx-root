@@ -956,6 +956,225 @@ function cmd_docker_compose_down_project(array $p): int {
 
 function cmd_postqueue_flush(array $p): int { return ncr_out(ncr_run(['postqueue', '-f']), false); }
 
+// ───────────────────────── panel update ─────────────────────────
+
+const NCR_SRC_DIR = '/opt/novacpx-src';
+
+function ncr_webroot(): string {
+    $ini = @parse_ini_file('/etc/novacpx/config.ini', true) ?: [];
+    $w = $ini['panel']['webroot'] ?? '/srv/novacpx/public';
+    return is_string($w) && preg_match('#^/[A-Za-z0-9_./-]{1,100}$#', $w) ? rtrim($w, '/') : '/srv/novacpx/public';
+}
+
+function ncr_channel_branch(mixed $c): string { return $c === 'beta' ? 'beta' : 'main'; }
+
+function ncr_git(array $args): array { return ncr_run(array_merge(['git', '-C', NCR_SRC_DIR], $args)); }
+
+/** Fetch the source checkout's origin and report what an update would bring. */
+function cmd_panel_update_check(array $p): int {
+    if (!is_dir(NCR_SRC_DIR . '/.git')) refuse('source checkout not found');
+    $branch = ncr_channel_branch($p['channel'] ?? 'stable');
+    ncr_run(['git', '-C', NCR_SRC_DIR, 'fetch', '-q', 'origin'], null, false, [], null);
+    [, $log] = ncr_git(['log', "HEAD..origin/{$branch}", '--oneline']);
+    [, $cur] = ncr_git(['rev-parse', '--short', 'HEAD']);
+    [, $cb]  = ncr_git(['branch', '--show-current']);
+    [, $rv]  = ncr_git(['show', "origin/{$branch}:VERSION"]);
+    return ncr_json(['updates' => array_values(array_filter(explode("\n", trim($log)))), 'current_commit' => trim($cur),
+                     'branch' => trim($cb) ?: 'main', 'remote_version' => trim($rv)]);
+}
+
+/** Hand the checkout to the deploy runner (pull, syntax check with rollback, rsync, migrations, version record). */
+function cmd_panel_update_apply(array $p): int {
+    if (!is_dir(NCR_SRC_DIR . '/.git')) refuse('source checkout not found');
+    $branch = ncr_channel_branch($p['channel'] ?? 'stable');
+    [, $before] = ncr_git(['rev-parse', 'HEAD']);
+    file_put_contents('/tmp/novacpx-deploy-queue.txt', NCR_SRC_DIR . '|' . ncr_webroot() . '|manual|' . $branch . "\n", FILE_APPEND | LOCK_EX);
+    [$rc, $out] = ncr_run(['bash', NCR_SRC_DIR . '/deploy/deploy-runner.sh']);
+    [, $after] = ncr_git(['rev-parse', 'HEAD']);
+    $ver = trim((string)@file_get_contents(NCR_SRC_DIR . '/VERSION'));
+    $log = is_file('/var/log/novacpx/deploy.log') ? implode('', array_slice(file('/var/log/novacpx/deploy.log'), -12)) : '';
+    return ncr_json(['before' => trim($before), 'after' => trim($after), 'updated' => trim($before) !== trim($after), 'version' => $ver, 'branch' => $branch, 'log' => $log . $out]);
+}
+
+// ───────────────────────── database engines and admin tools ─────────────────────────
+
+function ncr_emit(string $line): void { echo $line; flush(); }
+
+function cmd_dbengine(array $p): int {
+    $engine = $p['engine'] ?? '';
+    $action = $p['action'] ?? '';
+    $pk = ['mysql' => ['mysql-server'], 'mariadb' => ['mariadb-server'], 'postgresql' => ['postgresql', 'postgresql-contrib']];
+    $rm = ['mysql' => ['mysql-server', 'mysql-client'], 'mariadb' => ['mariadb-server', 'mariadb-client'], 'postgresql' => ['postgresql', 'postgresql-contrib']];
+    if (!isset($pk[$engine])) refuse('invalid engine');
+    if (!in_array($action, ['install', 'remove', 'start', 'stop', 'restart'], true)) refuse('invalid action');
+    $env = ['DEBIAN_FRONTEND' => 'noninteractive'];
+    if ($action === 'install') {
+        $r = ncr_run(array_merge(['apt-get', 'install', '-y'], $pk[$engine]), null, true, $env);
+        ncr_run(['systemctl', 'enable', $engine]); ncr_run(['systemctl', 'start', $engine]);
+        return (int)$r[0];
+    }
+    if ($action === 'remove') {
+        ncr_run(['systemctl', 'stop', $engine]);
+        return (int)ncr_run(array_merge(['apt-get', 'remove', '-y'], $rm[$engine]), null, true, $env)[0];
+    }
+    return ncr_out(ncr_run(['systemctl', $action, $engine]), false);
+}
+
+/** phpMyAdmin / pgAdmin 4 / Adminer: install, reinstall, remove. Streams progress lines. */
+function cmd_db_tool(array $p): int {
+    $tool = $p['tool'] ?? '';
+    $action = $p['action'] ?? '';
+    if (!in_array($tool, ['phpmyadmin', 'pgadmin', 'adminer'], true)) refuse('invalid tool');
+    if (!in_array($action, ['install', 'reinstall', 'remove'], true)) refuse('invalid action');
+    $env = ['DEBIAN_FRONTEND' => 'noninteractive'];
+    $ini = @parse_ini_file('/etc/novacpx/config.ini', true) ?: [];
+    $php = $ini['web']['php_default'] ?? '8.3';
+    if (!preg_match('/^[0-9]\.[0-9]$/', (string)$php)) $php = '8.3';
+    $apt = fn(array $a) => (int)ncr_run(array_merge(['apt-get'], $a), null, true, $env)[0];
+
+    if ($tool === 'adminer') {
+        $path = ncr_webroot() . '/adminer.php';
+        if ($action === 'remove') { ncr_emit("▶ Removing Adminer…\n"); @unlink($path); ncr_emit("  ✓ Removed\n"); return 0; }
+        ncr_emit("▶ Downloading Adminer…\n");
+        $tmp = '/root/.ncr-adminer.php';
+        [$rc, $out] = ncr_run(['curl', '-fsSL', 'https://www.adminer.org/latest.php', '-o', $tmp]);
+        if ($rc !== 0 || !is_file($tmp) || filesize($tmp) < 100000) { @unlink($tmp); ncr_emit("  ✗ Download failed: {$out}\n"); return 1; }
+        if (is_link($path)) refuse('destination is a symlink');
+        rename($tmp, $path); chown($path, 'www-data'); chgrp($path, 'www-data'); chmod($path, 0644);
+        ncr_emit("  ✓ Adminer installed at /adminer.php (" . round(filesize($path) / 1024) . " KB)\n");
+        return 0;
+    }
+
+    if ($tool === 'phpmyadmin') {
+        if ($action === 'remove' || $action === 'reinstall') {
+            ncr_emit("▶ Removing phpMyAdmin…\n");
+            // the package's post-removal script runs `a2disconf phpmyadmin`, which fails when the conf was never registered
+            if (is_dir('/etc/apache2/conf-available') && !file_exists('/etc/apache2/conf-available/phpmyadmin.conf') && is_file('/etc/phpmyadmin/apache.conf')) {
+                symlink('/etc/phpmyadmin/apache.conf', '/etc/apache2/conf-available/phpmyadmin.conf');
+            }
+            $apt(['remove', '-y', 'phpmyadmin']);
+            @unlink('/etc/nginx/conf.d/phpmyadmin.conf'); @unlink('/etc/nginx/snippets/phpmyadmin.conf');
+            if ($action === 'remove') return 0;
+        }
+        ncr_emit("▶ Pre-configuring debconf answers…\n");
+        ncr_run(['debconf-set-selections'], "phpmyadmin phpmyadmin/reconfigure-webserver multiselect apache2\nphpmyadmin phpmyadmin/dbconfig-install boolean true\n");
+        ncr_emit("▶ Installing phpMyAdmin (this takes 20–60 seconds)…\n");
+        if ($apt(['install', '-y', 'phpmyadmin', "php{$php}-mbstring", "php{$php}-xml", "php{$php}-zip"]) !== 0) { ncr_emit("✗ apt-get failed\n"); return 1; }
+        ncr_emit("▶ Configuring web server alias…\n");
+        if (is_dir('/etc/apache2/conf-available') && is_file('/etc/phpmyadmin/apache.conf')) {
+            if (!file_exists('/etc/apache2/conf-available/phpmyadmin.conf')) symlink('/etc/phpmyadmin/apache.conf', '/etc/apache2/conf-available/phpmyadmin.conf');
+            ncr_run(['a2enconf', 'phpmyadmin']);   // registered properly, so the package can remove it again
+            ncr_run(['systemctl', 'reload', 'apache2']);
+            ncr_emit("  ✓ Apache alias enabled\n");
+        }
+        if (is_dir('/etc/nginx')) {
+            // A `location` block is only valid inside a server block, so it is offered as a snippet (never dropped into conf.d,
+            // where it would make `nginx -t` fail and block every later reload).
+            @mkdir('/etc/nginx/snippets', 0755, true);
+            ncr_write_file('/etc/nginx/snippets/phpmyadmin.conf', "location /phpmyadmin {\n    root /usr/share/;\n    index index.php;\n    location ~ ^/phpmyadmin/(.+\\.php)\$ {\n        root /usr/share/;\n        fastcgi_pass unix:/run/php/php{$php}-fpm.sock;\n        fastcgi_index index.php;\n        include fastcgi.conf;\n    }\n}\n");
+            ncr_emit("  ✓ nginx snippet written: add `include snippets/phpmyadmin.conf;` inside the server block that should serve /phpmyadmin\n");
+        }
+        return 0;
+    }
+
+    // pgAdmin 4
+    if ($action === 'remove' || $action === 'reinstall') { ncr_emit("▶ Removing pgAdmin 4…\n"); $apt(['remove', '-y', 'pgadmin4', 'pgadmin4-web']); if ($action === 'remove') return 0; }
+    if (!is_file('/etc/apt/sources.list.d/pgadmin4.list')) {
+        ncr_emit("▶ Adding pgAdmin apt repository…\n");
+        [, $codename] = ncr_run(['lsb_release', '-cs']);
+        $codename = trim($codename);
+        if (!preg_match('/^[a-z]{3,20}$/', $codename)) $codename = 'jammy';
+        [$rc, $key] = ncr_run(['curl', '-fsSL', 'https://www.pgadmin.org/static/packages_pgadmin_org.pub']);
+        if ($rc !== 0) { ncr_emit("  ✗ could not fetch the repository key\n"); return 1; }
+        [$rc, $out] = ncr_run(['gpg', '--batch', '--yes', '--dearmor', '-o', '/usr/share/keyrings/pgadmin4.gpg'], $key);
+        if ($rc !== 0) { ncr_emit("  ✗ gpg failed: {$out}\n"); return 1; }
+        ncr_write_file('/etc/apt/sources.list.d/pgadmin4.list', "deb [signed-by=/usr/share/keyrings/pgadmin4.gpg] https://ftp.postgresql.org/pub/pgadmin/pgadmin4/apt/{$codename} pgadmin4 main\n");
+        ncr_emit("▶ Updating package lists…\n");
+        $apt(['update']);
+    }
+    ncr_emit("▶ Installing pgAdmin 4 web (this takes 1–3 minutes)…\n");
+    if ($apt(['install', '-y', 'pgadmin4-web']) !== 0) { ncr_emit("✗ apt-get failed\n"); return 1; }
+    ncr_emit("▶ Enabling Apache configuration…\n");
+    ncr_run(['a2enconf', 'pgadmin4']); ncr_run(['systemctl', 'reload', 'apache2']);
+    $email = $p['email'] ?? ''; $pass = $p['password'] ?? '';
+    if ($email !== '' && $pass !== '') {
+        if (!is_string($email) || !filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($email) > 120) refuse('invalid pgAdmin email');
+        if (!is_string($pass) || strlen($pass) < 8 || strlen($pass) > 128 || preg_match('/[\r\n\0]/', $pass)) refuse('invalid pgAdmin password');
+        ncr_emit("▶ Initialising pgAdmin database and admin user…\n");
+        @unlink('/var/lib/pgadmin/pgadmin4.db');
+        foreach (glob('/var/lib/pgadmin/pgadmin4.db.*') ?: [] as $f) @unlink($f);
+        ncr_run(['/usr/pgadmin4/venv/bin/python3', '/usr/pgadmin4/web/setup.py', 'setup-db'], null, true, ['PGADMIN_SETUP_EMAIL' => $email, 'PGADMIN_SETUP_PASSWORD' => $pass]);
+        @mkdir('/var/log/pgadmin', 0755, true);
+        ncr_run(['chown', '-R', '-h', 'www-data:www-data', '/var/lib/pgadmin', '/var/log/pgadmin']);
+        ncr_run(['systemctl', 'reload', 'apache2']);
+    } else {
+        ncr_emit("  ⚠ No credentials provided — run Reinstall to set up the admin user\n");
+    }
+    return 0;
+}
+
+// ───────────────────────── proxy local mode ─────────────────────────
+
+/** Local reverse-proxy mode: nginx takes 80/443, Apache moves to an internal port (and back). Streams progress lines. */
+function cmd_proxy_local(array $p): int {
+    $action = $p['action'] ?? '';
+    if (!in_array($action, ['enable', 'disable'], true)) refuse('invalid action');
+    $env = ['DEBIAN_FRONTEND' => 'noninteractive'];
+    if ($action === 'disable') {
+        $port = v_int($p['apache_port'] ?? 8090, 1, 65535, 'port');
+        ncr_emit("» Stopping nginx...\n");
+        ncr_run(['systemctl', 'stop', 'nginx']); ncr_run(['systemctl', 'disable', 'nginx']);
+        ncr_emit("» Migrating Apache from port {$port} → 80...\n");
+        ob_start(); cmd_web_apache_port(['from' => $port, 'to' => 80]); $res = trim((string)ob_get_clean());
+        ncr_emit("  {$res}\n");
+        ncr_emit("» Restarting Apache on port 80...\n");
+        ncr_run(['systemctl', 'restart', 'apache2']);
+        ncr_emit("✓ Proxy disabled. Apache is back on port 80/443.\n");
+        return 0;
+    }
+    $port = v_int($p['apache_port'] ?? 8090, 1024, 65535, 'port');
+    ncr_emit("» Checking nginx installation...\n");
+    if (!is_file('/usr/sbin/nginx')) {
+        ncr_emit("» Installing nginx...\n");
+        ncr_run(['apt-get', 'update', '-qq'], null, true, $env);
+        ncr_run(['apt-get', 'install', '-y', 'nginx'], null, true, $env);
+        if (!is_file('/usr/sbin/nginx')) { ncr_emit("ERROR: nginx install failed. Aborting.\n"); return 1; }
+    }
+    ncr_emit("» Stopping nginx to avoid config conflicts...\n");
+    ncr_run(['systemctl', 'stop', 'nginx']);
+    ncr_emit("» Migrating Apache from port 80 → {$port}...\n");
+    $moved = function (int $from, int $to): void {
+        ob_start(); cmd_web_apache_port(['from' => $from, 'to' => $to]); ob_end_clean();
+    };
+    $moved(80, $port);
+    [, $test] = ncr_run(['apache2ctl', 'configtest']);
+    if (!str_contains($test, 'Syntax OK')) {
+        ncr_emit("ERROR: Apache config test failed:\n{$test}\nRolling back...\n");
+        $moved($port, 80);
+        ncr_run(['systemctl', 'restart', 'apache2']);
+        ncr_emit("  Apache restored to port 80. Aborting.\n");
+        return 1;
+    }
+    ncr_run(['systemctl', 'restart', 'apache2']);
+    ncr_emit("  Apache is up on port {$port}\n");
+    ncr_emit("» Configuring nginx (remove default site, add catch-all)...\n");
+    @unlink('/etc/nginx/sites-enabled/default');
+    ncr_write_file('/etc/nginx/sites-available/novacpx-default.conf', "server {\n    listen 80 default_server;\n    server_name _;\n    return 444;\n}\n");
+    if (!file_exists('/etc/nginx/sites-enabled/novacpx-default.conf')) symlink('/etc/nginx/sites-available/novacpx-default.conf', '/etc/nginx/sites-enabled/novacpx-default.conf');
+    if (!file_exists('/etc/nginx/conf.d/novacpx-proxy.conf')) ncr_write_file('/etc/nginx/conf.d/novacpx-proxy.conf', "client_max_body_size 256M;\nproxy_buffers 16 16k;\nproxy_buffer_size 16k;\n");
+    ncr_emit("» Starting nginx on port 80/443...\n");
+    ncr_run(['systemctl', 'enable', 'nginx']); ncr_run(['systemctl', 'start', 'nginx']);
+    sleep(1);
+    [, $act] = ncr_run(['systemctl', 'is-active', 'nginx']);
+    if (trim($act) !== 'active') {
+        [, $err] = ncr_run(['nginx', '-t']);
+        ncr_emit("ERROR: nginx failed to start:\n{$err}\nApache is running on port {$port}. Fix nginx config and try again.\n");
+        return 1;
+    }
+    ncr_emit("  nginx is running\n");
+    return 0;
+}
+
 // ───────────────────────── dispatch ─────────────────────────
 
 const NCR_COMMANDS = [
@@ -967,6 +1186,8 @@ const NCR_COMMANDS = [
     'php.pool.write' => 'cmd_php_pool_write', 'php.pool.remove' => 'cmd_php_pool_remove', 'php.pecl' => 'cmd_php_pecl',
     'mail.sync' => 'cmd_mail_sync', 'dns.zone' => 'cmd_dns_zone', 'dns.remove' => 'cmd_dns_remove', 'pkg.apt' => 'cmd_pkg_apt',
     'fail2ban' => 'cmd_fail2ban', 'fail2ban.defaults' => 'cmd_fail2ban_defaults', 'postqueue.flush' => 'cmd_postqueue_flush',
+    'panel.update.check' => 'cmd_panel_update_check', 'panel.update.apply' => 'cmd_panel_update_apply',
+    'dbengine' => 'cmd_dbengine', 'db.tool' => 'cmd_db_tool', 'proxy.local' => 'cmd_proxy_local',
     'docker.status' => 'cmd_docker_status', 'docker.prune' => 'cmd_docker_prune', 'docker.states' => 'cmd_docker_states',
     'docker.action' => 'cmd_docker_action', 'docker.rm' => 'cmd_docker_rm', 'docker.logs' => 'cmd_docker_logs', 'docker.inspect' => 'cmd_docker_inspect',
     'docker.run' => 'cmd_docker_run', 'docker.list' => 'cmd_docker_list', 'docker.pull' => 'cmd_docker_pull', 'docker.rmi' => 'cmd_docker_rmi',
