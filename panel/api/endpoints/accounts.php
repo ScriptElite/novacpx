@@ -264,7 +264,9 @@ match ($action) {
         $acct = $db->fetchOne("SELECT a.user_id, a.username FROM accounts a WHERE a.id = ?", [$id]);
         if (!$acct) Response::error("Account not found", 404);
         $db->execute("UPDATE users SET password = ? WHERE id = ?", [password_hash($pass, PASSWORD_BCRYPT), $acct['user_id']]);
-        shell_exec("echo " . escapeshellarg("{$acct['username']}:{$pass}") . " | sudo chpasswd 2>/dev/null");
+        require_once NOVACPX_LIB . '/Root.php';
+        $r = Root::run('user.passwd', ['username' => $acct['username'], 'password' => $pass]);
+        if ($r['rc'] !== 0) novacpx_log('warn', "Linux password change failed for {$acct['username']}: " . trim($r['out']));
         audit('account.change-password', "account:$id");
         Response::success(null, 'Password changed');
     })(),

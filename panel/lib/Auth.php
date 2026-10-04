@@ -55,6 +55,22 @@ class Auth {
         return true;
     }
 
+    /** Endpoint scopes granted to an API token (null = logged in by session, no restriction). */
+    private ?array $tokenScopes = null;
+
+    /** permissions column: JSON list of endpoint names, or ["*"]. Anything else grants nothing. */
+    private function parseScopes($raw): array {
+        $list = is_string($raw) ? json_decode($raw, true) : $raw;
+        if (!is_array($list)) return [];
+        return array_values(array_filter($list, 'is_string'));
+    }
+
+    /** True when the caller may use this API endpoint (always true for session logins). */
+    public function endpointAllowed(string $endpoint): bool {
+        if ($this->tokenScopes === null) return true;
+        return in_array('*', $this->tokenScopes, true) || in_array($endpoint, $this->tokenScopes, true);
+    }
+
     private function loginByToken(string $token): bool {
         $db  = DB::getInstance();
         $row = $db->fetchOne(
@@ -67,6 +83,7 @@ class Auth {
         if (!$row) return false;
         $db->execute("UPDATE api_tokens SET last_used = NOW() WHERE token = ?", [hash('sha256', $token)]);
         $this->user = $row;
+        $this->tokenScopes = $this->parseScopes($row['permissions'] ?? null);
         return true;
     }
 

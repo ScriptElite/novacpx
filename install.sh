@@ -228,9 +228,9 @@ server {
 }
 NGXCONF
   ln -sf "$PANEL_WEB_CONF" /etc/nginx/sites-enabled/novacpx
-  # Allow www-data to manage customer vhost configs
-  chown root:www-data /etc/nginx/sites-available /etc/nginx/sites-enabled
-  chmod 775 /etc/nginx/sites-available /etc/nginx/sites-enabled
+  # Customer vhosts are written by the privileged helper (deploy/novacpx-root), never by www-data
+  chown root:root /etc/nginx/sites-available /etc/nginx/sites-enabled
+  chmod 755 /etc/nginx/sites-available /etc/nginx/sites-enabled
 
 else
   apt-get install -y -qq apache2 libapache2-mod-fcgid >> "$LOG" 2>&1
@@ -620,8 +620,8 @@ port     = ${PORT_WEBMAIL}
 logpath  = /var/log/novacpx/access.log
 maxretry = 10
 F2B
-chown root:www-data /etc/fail2ban/jail.local
-chmod 664 /etc/fail2ban/jail.local
+chown root:root /etc/fail2ban/jail.local   # edited through the privileged helper only
+chmod 644 /etc/fail2ban/jail.local
 
 # Install NovaCPX filter definitions
 for jail in novacpx-user novacpx-reseller novacpx-admin novacpx-webmail; do
@@ -644,119 +644,15 @@ systemctl enable fail2ban >> "$LOG" 2>&1
 systemctl restart fail2ban >> "$LOG" 2>&1
 log "Fail2Ban configured"
 
-# ── Sudoers for NovaCPX panel (www-data needs root for firewall/opendkim) ────
-cat > /etc/sudoers.d/novacpx-firewall <<SUDOERS
-Defaults:www-data !requiretty
-# Firewall / security
-www-data ALL=(root) NOPASSWD: /usr/sbin/ufw status
-www-data ALL=(root) NOPASSWD: /usr/sbin/ufw status verbose
-www-data ALL=(root) NOPASSWD: /usr/sbin/ufw allow *
-www-data ALL=(root) NOPASSWD: /usr/sbin/ufw deny *
-www-data ALL=(root) NOPASSWD: /usr/sbin/ufw delete *
-www-data ALL=(root) NOPASSWD: /usr/sbin/ufw reload
-www-data ALL=(root) NOPASSWD: /usr/sbin/ufw enable
-www-data ALL=(root) NOPASSWD: /usr/sbin/ufw disable
-www-data ALL=(root) NOPASSWD: /usr/sbin/ufw logging *
-www-data ALL=(root) NOPASSWD: /usr/bin/fail2ban-client *
-# Web servers
-www-data ALL=(root) NOPASSWD: /bin/systemctl start apache2
-www-data ALL=(root) NOPASSWD: /bin/systemctl stop apache2
-www-data ALL=(root) NOPASSWD: /bin/systemctl restart apache2
-www-data ALL=(root) NOPASSWD: /bin/systemctl reload apache2
-www-data ALL=(root) NOPASSWD: /bin/systemctl enable apache2
-www-data ALL=(root) NOPASSWD: /bin/systemctl start nginx
-www-data ALL=(root) NOPASSWD: /bin/systemctl stop nginx
-www-data ALL=(root) NOPASSWD: /bin/systemctl restart nginx
-www-data ALL=(root) NOPASSWD: /bin/systemctl reload nginx
-www-data ALL=(root) NOPASSWD: /bin/systemctl enable nginx
-www-data ALL=(root) NOPASSWD: /usr/sbin/nginx *
-# Mail servers
-www-data ALL=(root) NOPASSWD: /bin/systemctl start postfix
-www-data ALL=(root) NOPASSWD: /bin/systemctl stop postfix
-www-data ALL=(root) NOPASSWD: /bin/systemctl restart postfix
-www-data ALL=(root) NOPASSWD: /bin/systemctl reload postfix
-www-data ALL=(root) NOPASSWD: /bin/systemctl start dovecot
-www-data ALL=(root) NOPASSWD: /bin/systemctl stop dovecot
-www-data ALL=(root) NOPASSWD: /bin/systemctl restart dovecot
-www-data ALL=(root) NOPASSWD: /bin/systemctl reload dovecot
-www-data ALL=(root) NOPASSWD: /bin/systemctl start rspamd
-www-data ALL=(root) NOPASSWD: /bin/systemctl stop rspamd
-www-data ALL=(root) NOPASSWD: /bin/systemctl restart rspamd
-www-data ALL=(root) NOPASSWD: /bin/systemctl enable rspamd
-www-data ALL=(root) NOPASSWD: /bin/systemctl disable rspamd
-www-data ALL=(root) NOPASSWD: /usr/sbin/postqueue -f
-# FTP servers
-www-data ALL=(root) NOPASSWD: /bin/systemctl start proftpd
-www-data ALL=(root) NOPASSWD: /bin/systemctl stop proftpd
-www-data ALL=(root) NOPASSWD: /bin/systemctl restart proftpd
-www-data ALL=(root) NOPASSWD: /bin/systemctl reload proftpd
-www-data ALL=(root) NOPASSWD: /bin/systemctl enable proftpd
-www-data ALL=(root) NOPASSWD: /bin/systemctl start vsftpd
-www-data ALL=(root) NOPASSWD: /bin/systemctl stop vsftpd
-www-data ALL=(root) NOPASSWD: /bin/systemctl restart vsftpd
-www-data ALL=(root) NOPASSWD: /bin/systemctl enable vsftpd
-www-data ALL=(root) NOPASSWD: /bin/systemctl start pure-ftpd
-www-data ALL=(root) NOPASSWD: /bin/systemctl stop pure-ftpd
-www-data ALL=(root) NOPASSWD: /bin/systemctl restart pure-ftpd
-www-data ALL=(root) NOPASSWD: /bin/systemctl enable pure-ftpd
-# DNS servers
-www-data ALL=(root) NOPASSWD: /bin/systemctl start named
-www-data ALL=(root) NOPASSWD: /bin/systemctl stop named
-www-data ALL=(root) NOPASSWD: /bin/systemctl restart named
-www-data ALL=(root) NOPASSWD: /bin/systemctl reload named
-www-data ALL=(root) NOPASSWD: /bin/systemctl start bind9
-www-data ALL=(root) NOPASSWD: /bin/systemctl stop bind9
-www-data ALL=(root) NOPASSWD: /bin/systemctl restart bind9
-www-data ALL=(root) NOPASSWD: /bin/systemctl start pdns
-www-data ALL=(root) NOPASSWD: /bin/systemctl stop pdns
-www-data ALL=(root) NOPASSWD: /bin/systemctl restart pdns
-www-data ALL=(root) NOPASSWD: /bin/systemctl start nsd
-www-data ALL=(root) NOPASSWD: /bin/systemctl stop nsd
-www-data ALL=(root) NOPASSWD: /bin/systemctl restart nsd
-# Database servers
-www-data ALL=(root) NOPASSWD: /bin/systemctl start mysql
-www-data ALL=(root) NOPASSWD: /bin/systemctl stop mysql
-www-data ALL=(root) NOPASSWD: /bin/systemctl restart mysql
-www-data ALL=(root) NOPASSWD: /bin/systemctl start mariadb
-www-data ALL=(root) NOPASSWD: /bin/systemctl stop mariadb
-www-data ALL=(root) NOPASSWD: /bin/systemctl restart mariadb
-# Security
-www-data ALL=(root) NOPASSWD: /bin/systemctl start fail2ban
-www-data ALL=(root) NOPASSWD: /bin/systemctl stop fail2ban
-www-data ALL=(root) NOPASSWD: /bin/systemctl restart fail2ban
-www-data ALL=(root) NOPASSWD: /bin/systemctl reload fail2ban
-# PHP-FPM
-www-data ALL=(root) NOPASSWD: /bin/systemctl reload php*-fpm
-www-data ALL=(root) NOPASSWD: /bin/systemctl restart php*-fpm
-www-data ALL=(root) NOPASSWD: /bin/systemctl start php*-fpm
-www-data ALL=(root) NOPASSWD: /bin/systemctl stop php*-fpm
-www-data ALL=(root) NOPASSWD: /usr/bin/tee /etc/php/*/fpm/pool.d/*
-www-data ALL=(root) NOPASSWD: /bin/rm -f /etc/php/*/fpm/pool.d/*.conf
-www-data ALL=(root) NOPASSWD: /usr/bin/rm -f /etc/php/*/fpm/pool.d/*.conf
-# Web config file management (scoped paths only)
-www-data ALL=(root) NOPASSWD: /usr/bin/tee /etc/nginx/conf.d/*
-www-data ALL=(root) NOPASSWD: /usr/bin/tee /etc/nginx/sites-available/*
-www-data ALL=(root) NOPASSWD: /usr/bin/tee /etc/nginx/sites-enabled/*
-www-data ALL=(root) NOPASSWD: /usr/bin/tee /etc/apache2/conf-enabled/*
-www-data ALL=(root) NOPASSWD: /bin/ln -sf /etc/nginx/sites-available/* /etc/nginx/sites-enabled/*
-www-data ALL=(root) NOPASSWD: /bin/rm /etc/nginx/sites-available/novacpx-*
-www-data ALL=(root) NOPASSWD: /bin/rm /etc/nginx/sites-enabled/novacpx-*
-# Account management (user creation and home directories)
-www-data ALL=(root) NOPASSWD: /usr/sbin/useradd *
-www-data ALL=(root) NOPASSWD: /usr/sbin/userdel *
-www-data ALL=(root) NOPASSWD: /usr/sbin/usermod *
-www-data ALL=(root) NOPASSWD: /usr/sbin/chpasswd
-www-data ALL=(root) NOPASSWD: /bin/mkdir *
-www-data ALL=(root) NOPASSWD: /bin/chown *
-www-data ALL=(root) NOPASSWD: /bin/chmod *
-# SSL and DKIM
-www-data ALL=(root) NOPASSWD: /usr/bin/certbot *
-www-data ALL=(root) NOPASSWD: /usr/bin/opendkim-genkey *
-www-data ALL=(root) NOPASSWD: /usr/sbin/rndc reload
-www-data ALL=(root) NOPASSWD: /usr/sbin/named-checkzone *
-SUDOERS
-chmod 440 /etc/sudoers.d/novacpx-firewall
-log "Sudoers rules installed"
+# ── Privileged helper + sudoers ───────────────────────────────────────────────
+# The panel (www-data) may run exactly one privileged program, /usr/local/sbin/novacpx-root, which validates every
+# request (no sudo wildcards for chown/chmod/useradd/tee/docker/...). See deploy/novacpx-root and deploy/install-root-helper.sh.
+bash /opt/novacpx-src/deploy/install-root-helper.sh --lockdown >> "$LOG" 2>&1
+log "Privileged helper and sudoers installed"
+
+# Auto-deploy: poll origin/main every minute and deploy new commits (no inbound webhook needed)
+bash /opt/novacpx-src/deploy/install-autodeploy.sh >> "$LOG" 2>&1
+log "Auto-deploy installed"
 
 # ── Cron jobs ─────────────────────────────────────────────────────────────────
 step "Setting Up Cron Jobs"

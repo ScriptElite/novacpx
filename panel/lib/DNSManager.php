@@ -2,6 +2,8 @@
 /**
  * DNSManager — BIND9 zone file generation and management
  */
+require_once __DIR__ . '/Root.php';
+
 class DNSManager {
 
     private static string $zonesDir   = '/etc/bind/novacpx-zones';
@@ -44,10 +46,7 @@ class DNSManager {
         if ($zone) {
             $db->execute("DELETE FROM dns_zones WHERE id = ?", [$zone['id']]);
         }
-        $file = self::$zonesDir . '/' . $domain . '.zone';
-        @unlink($file);
-        self::rebuildNamedConf();
-        self::reloadBind();
+        Root::run('dns.remove', ['domain' => $domain]);   // removes the zone file, rebuilds the zone list, reloads BIND
     }
 
     public static function addRecord(int $zoneId, string $name, string $type, string $content, int $ttl = 3600, ?int $priority = null): int {
@@ -91,7 +90,6 @@ class DNSManager {
         if (!$zone) return;
         $records = $db->fetchAll("SELECT * FROM dns_records WHERE zone_id = ? ORDER BY type, name", [$zoneId]);
 
-        @mkdir(self::$zonesDir, 0755, true);
         $domain  = $zone['domain'];
         $content = "\$ORIGIN {$domain}.\n\$TTL {$zone['ttl']}\n\n";
         $content .= "@ IN SOA {$zone['primary_ns']}. {$zone['admin_email']}. (\n";
@@ -106,34 +104,20 @@ class DNSManager {
         foreach ($records as $r) {
             $name = $r['name'] === '@' ? '@' : $r['name'];
             $prio = $r['priority'] !== null ? "{$r['priority']} " : '';
-            $val  = in_array($r['type'], ['TXT','SPF','DMARC','DKIM']) ? "\"{$r['content']}\"" : $r['content'];
+            $val  = in_array($r['type'], ['TXT','SPF','DMARC','DKIM'])
+                ? implode(' ', array_map(fn($chunk) => '"' . str_replace(['\\', '"'], ['\\\\', '\\"'], $chunk) . '"', str_split((string)$r['content'], 255) ?: ['']))
+                : $r['content'];
             $content .= "{$name} {$r['ttl']} IN {$r['type']} {$prio}{$val}\n";
         }
 
-        file_put_contents(self::$zonesDir . '/' . $domain . '.zone', $content);
-        self::rebuildNamedConf();
-    }
-
-    private static function rebuildNamedConf(): void {
-        @mkdir(self::$zonesDir, 0755, true);
-        $zones = glob(self::$zonesDir . '/*.zone') ?: [];
-        $conf  = "// NovaCPX auto-generated zone list\n";
-        foreach ($zones as $zf) {
-            $domain = basename($zf, '.zone');
-            $conf  .= "zone \"{$domain}\" { type master; file \"" . self::$zonesDir . "/{$domain}.zone\"; };\n";
-        }
-        file_put_contents(self::$namedConf, $conf);
-
-        // Include in main named.conf if not already there
-        $mainConf = '/etc/bind/named.conf';
-        if (file_exists($mainConf) && !str_contains(file_get_contents($mainConf) ?: '', 'named.conf.novacpx')) {
-            $line = "\ninclude \"" . self::$namedConf . "\";\n";
-            shell_exec("echo " . escapeshellarg($line) . " | sudo tee -a {$mainConf} > /dev/null 2>&1");
-        }
+        // The privileged helper checks every line (plain resource records only), validates the zone with named-checkzone,
+        // installs it, rebuilds the zone list and reloads BIND.
+        $r = Root::run('dns.zone', ['domain' => $domain, 'content' => $content]);
+        if ($r['rc'] !== 0) throw new RuntimeException('DNS zone rejected: ' . trim($r['out']));
     }
 
     private static function reloadBind(): void {
-        shell_exec("sudo rndc reload 2>/dev/null || sudo systemctl reload named 2>/dev/null || sudo systemctl reload bind9 2>/dev/null || true");
+        // Nothing to do: the helper reloads BIND whenever it installs or removes a zone.
     }
 
     private static function serverIp(): string {

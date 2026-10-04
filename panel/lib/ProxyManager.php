@@ -52,6 +52,8 @@
  *   proxy_remote_pass   — SSH password
  *   proxy_backend_ip    — IP of NovaCPX Apache (used when syncing proxy hosts)
  */
+require_once __DIR__ . '/Root.php';
+
 class ProxyManager {
 
     private static string $confDir    = '/etc/nginx/sites-available';
@@ -226,8 +228,8 @@ class ProxyManager {
                     escapeshellarg(self::$enabledDir . '/' . self::$confPrefix . $safe . '.conf')
                 );
             } else {
-                @unlink(self::$confDir    . '/' . self::$confPrefix . $safe . '.conf');
-                @unlink(self::$enabledDir . '/' . self::$confPrefix . $safe . '.conf');
+                self::writeAllConfigs();   // regenerates the proxy hosts without this one and reloads nginx
+                return;
             }
         }
         self::reload();
@@ -256,8 +258,16 @@ class ProxyManager {
             self::remoteExec('rm -f ' . self::$confDir . '/' . self::$confPrefix . '*.conf ' .
                 self::$enabledDir . '/' . self::$confPrefix . '*.conf');
         } else {
-            foreach (glob(self::$confDir    . '/' . self::$confPrefix . '*.conf') ?: [] as $f) @unlink($f);
-            foreach (glob(self::$enabledDir . '/' . self::$confPrefix . '*.conf') ?: [] as $f) @unlink($f);
+            // Local nginx: the privileged helper generates every proxy vhost from these fields (it never takes nginx text).
+            // Hand-written custom_config is not supported in local mode; those hosts get the standard generated config.
+            $list = [];
+            foreach ($hosts as $host) {
+                if (!$host['enabled']) continue;
+                $list[] = ['domain' => strtolower($host['domain']), 'upstream' => $host['upstream'], 'ssl_enabled' => !empty($host['ssl_enabled'])];
+            }
+            $r = Root::run('proxy.sync', ['hosts' => $list]);
+            if ($r['rc'] !== 0) novacpx_log('warn', 'Proxy sync failed: ' . trim($r['out']));
+            return;
         }
 
         foreach ($hosts as $host) {
@@ -335,69 +345,20 @@ class ProxyManager {
      *   Yields progress lines suitable for SSE streaming.
      */
     public static function switchToLocalMode(int $apachePort = 8090): \Generator {
-        require_once NOVACPX_LIB . '/VhostManager.php';
         $db   = DB::getInstance();
         $save = function(string $k, string $v) use ($db) {
             $db->execute("INSERT INTO settings (`key`, value) VALUES (?,?) ON DUPLICATE KEY UPDATE value=VALUES(value)", [$k, $v]);
         };
 
-        yield "» Checking nginx installation...\n";
-        if (!file_exists('/usr/sbin/nginx') && empty(shell_exec('which nginx 2>/dev/null'))) {
-            yield "» Installing nginx (apt-get install -y nginx)...\n";
-            $out = shell_exec('apt-get update -qq 2>&1 && apt-get install -y nginx 2>&1');
-            if ($out) yield trim($out) . "\n";
-            if (!file_exists('/usr/sbin/nginx')) { yield "ERROR: nginx install failed. Aborting.\n"; return; }
-            yield "  nginx installed\n";
-        } else {
-            yield "  nginx already installed\n";
-        }
-
-        yield "» Stopping nginx to avoid config conflicts...\n";
-        shell_exec('systemctl stop nginx 2>/dev/null');
-
-        yield "» Migrating Apache from port 80 → {$apachePort}...\n";
-        $changed = VhostManager::migrateApachePort(80, $apachePort);
-        yield "  Updated {$changed} vhost(s) and ports.conf\n";
-
-        yield "» Restarting Apache on port {$apachePort}...\n";
-        $apacheTest = shell_exec('apache2ctl configtest 2>&1');
-        if (strpos($apacheTest ?? '', 'Syntax OK') === false) {
-            yield "ERROR: Apache config test failed:\n{$apacheTest}\nRolling back...\n";
-            VhostManager::restoreApachePort($apachePort, 80);
-            shell_exec('systemctl restart apache2 2>/dev/null');
-            yield "  Apache restored to port 80. Aborting.\n";
-            return;
-        }
-        shell_exec('systemctl restart apache2 2>/dev/null');
-        yield "  Apache is up on port {$apachePort}\n";
-
-        yield "» Configuring nginx (remove default site, add catch-all)...\n";
-        @unlink('/etc/nginx/sites-enabled/default');
-        $catchAll = "server {\n    listen 80 default_server;\n    server_name _;\n    return 444;\n}\n";
-        file_put_contents('/etc/nginx/sites-available/novacpx-default.conf', $catchAll);
-        if (!file_exists('/etc/nginx/sites-enabled/novacpx-default.conf')) {
-            @symlink('/etc/nginx/sites-available/novacpx-default.conf', '/etc/nginx/sites-enabled/novacpx-default.conf');
-        }
-        if (!file_exists('/etc/nginx/conf.d/novacpx-proxy.conf')) {
-            file_put_contents('/etc/nginx/conf.d/novacpx-proxy.conf',
-                "client_max_body_size 256M;\nproxy_buffers 16 16k;\nproxy_buffer_size 16k;\n");
-        }
+        // Install nginx, move Apache to $apachePort, add the catch-all vhost and start nginx: all in the privileged helper.
+        $gen = Root::lines('proxy.local', ['action' => 'enable', 'apache_port' => $apachePort]);
+        foreach ($gen as $line) yield $line;
+        if ($gen->getReturn() !== 0) return;
 
         yield "» Saving proxy settings...\n";
         $save('proxy_mode', 'local');
         $save('proxy_backend_ip', '127.0.0.1');
         $save('proxy_apache_port', (string)$apachePort);
-
-        yield "» Starting nginx on port 80/443...\n";
-        shell_exec('systemctl enable nginx 2>/dev/null && systemctl start nginx 2>/dev/null');
-        sleep(1);
-        if (!self::isRunning()) {
-            $err = shell_exec('nginx -t 2>&1');
-            yield "ERROR: nginx failed to start:\n{$err}\n";
-            yield "Apache is running on port {$apachePort}. Fix nginx config and try again.\n";
-            return;
-        }
-        yield "  nginx is running\n";
 
         yield "» Syncing proxy hosts from all active accounts...\n";
         $added = self::syncFromAccounts();
@@ -414,25 +375,16 @@ class ProxyManager {
      * Revert local mode: move Apache back to 80/443, stop nginx, disable proxy.
      */
     public static function disableLocalMode(): \Generator {
-        require_once NOVACPX_LIB . '/VhostManager.php';
         $db         = DB::getInstance();
         $apachePort = (int)($db->fetchOne("SELECT value FROM settings WHERE `key`='proxy_apache_port'")['value'] ?? 8090);
 
-        yield "» Stopping nginx...\n";
-        shell_exec('systemctl stop nginx 2>/dev/null && systemctl disable nginx 2>/dev/null');
-
-        yield "» Migrating Apache from port {$apachePort} → 80...\n";
-        $changed = VhostManager::restoreApachePort($apachePort);
-        yield "  Updated {$changed} vhost(s) and ports.conf\n";
-
-        yield "» Restarting Apache on port 80...\n";
-        shell_exec('systemctl restart apache2 2>/dev/null');
+        $gen = Root::lines('proxy.local', ['action' => 'disable', 'apache_port' => $apachePort]);
+        foreach ($gen as $line) yield $line;
+        if ($gen->getReturn() !== 0) return;
 
         yield "» Saving settings...\n";
         $db->execute("INSERT INTO settings (`key`, value) VALUES ('proxy_mode','disabled') ON DUPLICATE KEY UPDATE value='disabled'");
         $db->execute("UPDATE settings SET value='80' WHERE `key`='proxy_apache_port'");
-
-        yield "✓ Proxy disabled. Apache is back on port 80/443.\n";
     }
 
     // --- Remote setup & uninstall ---
@@ -478,9 +430,8 @@ class ProxyManager {
             self::remoteExec('nginx -t 2>/dev/null && systemctl reload nginx 2>/dev/null || true');
             return 'proxy configs removed from remote VM';
         }
-        // Local uninstall
-        foreach (glob(self::$confDir    . '/' . self::$confPrefix . '*.conf') ?: [] as $f) @unlink($f);
-        foreach (glob(self::$enabledDir . '/' . self::$confPrefix . '*.conf') ?: [] as $f) @unlink($f);
+        // Local uninstall: an empty host list removes every generated proxy vhost
+        Root::run('proxy.sync', ['hosts' => []]);
         if ($removeNginx) {
             shell_exec('systemctl stop nginx 2>/dev/null; apt-get remove -y nginx nginx-common 2>/dev/null');
             return 'nginx removed';

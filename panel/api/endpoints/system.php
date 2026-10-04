@@ -4,6 +4,7 @@
  * Admin-only actions gated with Auth::require('admin')
  */
 
+require_once NOVACPX_LIB . '/Root.php';
 Auth::getInstance()->require('admin', 'reseller', 'user');
 $db   = DB::getInstance();
 $body = json_decode(file_get_contents('php://input'), true) ?? [];
@@ -154,11 +155,9 @@ echo "[\$(ts)] Preparing backup..."
 mkdir -p {$backupDir}
 cp -a {$webRoot} {$backupDir}/public 2>/dev/null
 echo "[\$(ts)] Updating package lists..."
-sudo apt-get update -q
+printf '%s' '{"op":"update"}' | sudo -n /usr/local/sbin/novacpx-root pkg.apt
 echo "[\$(ts)] Running upgrade (non-interactive)..."
-DEBIAN_FRONTEND=noninteractive sudo apt-get upgrade -y \
-  -o Dpkg::Options::="--force-confdef" \
-  -o Dpkg::Options::="--force-confold"
+printf '%s' '{"op":"upgrade"}' | sudo -n /usr/local/sbin/novacpx-root pkg.apt
 UPGRADE_EXIT=\$?
 echo "[\$(ts)] Checking services..."
 for SVC in {$webSvc} mysql postfix dovecot; do
@@ -219,18 +218,14 @@ BASH;
             Response::success($data);
         }
 
-        $srcDir  = '/opt/novacpx-src';
-        if (!is_dir($srcDir)) Response::error('Source repo not found at /opt/novacpx-src');
         $channelRow   = $db->fetchOne("SELECT value FROM settings WHERE `key`='update_channel'");
         $channel      = in_array($channelRow['value'] ?? '', ['stable', 'beta']) ? $channelRow['value'] : 'stable';
-        $remoteBranch = $channel === 'beta' ? 'origin/beta' : 'origin/main';
-        shell_exec("sudo git -C " . escapeshellarg($srcDir) . " fetch origin 2>/dev/null");
-        $logOut  = shell_exec("sudo git -C " . escapeshellarg($srcDir) . " log HEAD.." . escapeshellarg($remoteBranch) . " --oneline 2>/dev/null") ?: '';
-        $updates = array_values(array_filter(explode("\n", trim($logOut))));
-        $branch  = trim(shell_exec("sudo git -C " . escapeshellarg($srcDir) . " branch --show-current 2>/dev/null") ?: 'main');
-        $commit  = trim(shell_exec("sudo git -C " . escapeshellarg($srcDir) . " rev-parse --short HEAD 2>/dev/null") ?: '');
-        $remoteVer = trim(shell_exec("sudo git -C " . escapeshellarg($srcDir) . " show " . escapeshellarg("{$remoteBranch}:VERSION") . " 2>/dev/null") ?: '');
-        $result  = ['updates_available' => count($updates), 'current_commit' => $commit, 'branch' => $branch, 'channel' => $channel, 'remote_version' => $remoteVer, 'commits' => $updates];
+        $r = Root::run('panel.update.check', ['channel' => $channel]);
+        if ($r['rc'] !== 0) Response::error('Update check failed: ' . trim($r['out']));
+        $info    = json_decode($r['out'], true) ?: [];
+        $updates = $info['updates'] ?? [];
+        $result  = ['updates_available' => count($updates), 'current_commit' => $info['current_commit'] ?? '', 'branch' => $info['branch'] ?? 'main', 'channel' => $channel,
+                    'remote_version' => $info['remote_version'] ?? '', 'commits' => $updates];
         $db->execute("INSERT INTO settings(`key`,value,updated_at) VALUES('update_cache_novacpx',?,datetime('now')) ON CONFLICT(`key`) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", [json_encode($result)]);
         Response::success($result);
     })(),
@@ -238,127 +233,32 @@ BASH;
     // ── Apply NovaCPX update ─────────────────────────────────────────────────
     'apply-novacpx-update' => (function() use ($db) {
         Auth::getInstance()->require('admin');
-        set_time_limit(180);
-        $srcDir  = '/opt/novacpx-src';
-        $webRoot = defined('WEB_ROOT') ? WEB_ROOT : '/srv/novacpx/public';
-        $steps   = [];
+        set_time_limit(240);
+        $channelRow = $db->fetchOne("SELECT value FROM settings WHERE `key`='update_channel'");
+        $channel    = in_array($channelRow['value'] ?? '', ['stable', 'beta']) ? $channelRow['value'] : 'stable';
 
-        if (!is_dir($srcDir)) Response::error('Source repo not found at /opt/novacpx-src');
-
-        $channelRow   = $db->fetchOne("SELECT value FROM settings WHERE `key`='update_channel'");
-        $channel      = in_array($channelRow['value'] ?? '', ['stable', 'beta']) ? $channelRow['value'] : 'stable';
-        $targetBranch = $channel === 'beta' ? 'beta' : 'main';
-
-        $before = trim(shell_exec("sudo git -C " . escapeshellarg($srcDir) . " rev-parse HEAD 2>/dev/null") ?: '');
-        $steps[] = "Before: $before (channel: $channel)";
-
-        // Backup current web root to /tmp (writable, no sudo needed)
-        // rsync contents into $backupDir so restore can rsync $backupDir/ back symmetrically
-        $backupDir = '/tmp/novacpx-backup-' . date('YmdHis');
-        shell_exec("rsync -a " . escapeshellarg("$webRoot/") . " " . escapeshellarg("$backupDir/") . " 2>&1");
-        $steps[] = "Backup: $backupDir";
-
-        // Pull new code from the channel branch (sudo so www-data can write root-owned repo)
-        $pull = shell_exec("sudo git -C " . escapeshellarg($srcDir) . " pull origin " . escapeshellarg($targetBranch) . " 2>&1");
-        $steps[] = "Pull: " . trim($pull ?: '(no output)');
-
-        $after   = trim(shell_exec("sudo git -C " . escapeshellarg($srcDir) . " rev-parse HEAD 2>/dev/null") ?: '');
-        $changed = $before !== $after;
-        $steps[] = "After: $after" . ($changed ? " (changed)" : " (no change)");
-
-        if ($changed) {
-            // Validate PHP syntax — only check files changed in this update
-            $diffOut  = shell_exec("sudo git -C " . escapeshellarg($srcDir) . " diff " . escapeshellarg($before) . " " . escapeshellarg($after) . " --name-only 2>/dev/null") ?: '';
-            $phpFiles = [];
-            foreach (array_filter(explode("\n", trim($diffOut))) as $f) {
-                $f = trim($f);
-                if (str_ends_with($f, '.php')) {
-                    $full = "$srcDir/$f";
-                    if (file_exists($full)) $phpFiles[] = $full;
-                }
-            }
-
-            $syntaxErr = [];
-            foreach ($phpFiles as $f) {
-                $check = shell_exec("php8.3 -l " . escapeshellarg($f) . " 2>&1");
-                if (!str_contains($check, 'No syntax errors')) {
-                    $syntaxErr[] = basename($f) . ': ' . trim($check);
-                }
-            }
-            $steps[] = "Syntax check: " . count($phpFiles) . " changed files, " . count($syntaxErr) . " errors";
-
-            if ($syntaxErr) {
-                shell_exec("sudo git -C " . escapeshellarg($srcDir) . " reset --hard " . escapeshellarg($before) . " 2>&1");
-                Response::error('Update aborted — PHP syntax errors: ' . implode('; ', $syntaxErr));
-            }
-
-            // Deploy files to web root
-            shell_exec("sudo rsync -a --delete " . escapeshellarg("$srcDir/panel/public/") . " " . escapeshellarg("$webRoot/") . " 2>&1");
-            shell_exec("sudo rsync -a " . escapeshellarg("$srcDir/panel/lib/") . " " . escapeshellarg("$webRoot/lib/") . " 2>&1");
-            shell_exec("sudo rsync -a " . escapeshellarg("$srcDir/panel/api/") . " " . escapeshellarg("$webRoot/api/") . " 2>&1");
-            shell_exec("sudo cp " . escapeshellarg("$srcDir/VERSION") . " " . escapeshellarg("$webRoot/VERSION") . " 2>/dev/null");
-            shell_exec("sudo chown -R www-data:www-data " . escapeshellarg($webRoot));
-            $steps[] = "Deploy: rsync complete";
-
-            // Run pending DB migrations (SQLite syntax)
-            $migrDir = "$srcDir/db/migrations";
-            if (is_dir($migrDir)) {
-                foreach (glob("$migrDir/*.sql") as $sql) {
-                    $migName = basename($sql, '.sql');
-                    $already = $db->fetchOne("SELECT 1 FROM settings WHERE `key` = ?", ["migration_$migName"]);
-                    if (!$already) {
-                        try { $db->pdo()->exec(file_get_contents($sql)); } catch (\Throwable $e) { /* skip dupes */ }
-                        $db->execute("INSERT INTO settings (`key`,`value`,updated_at) VALUES (?,datetime('now'),datetime('now')) ON CONFLICT(`key`) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at", ["migration_$migName"]);
-                        $steps[] = "Migration: $migName applied";
-                    }
-                }
-            }
-
-            // Record new version in novacpx_version table and settings
-            $newVersion = trim(shell_exec("sudo cat " . escapeshellarg("$srcDir/VERSION") . " 2>/dev/null") ?: '');
-            if ($newVersion) {
-                $db->execute("INSERT INTO novacpx_version (version, installed_at, notes, git_commit) VALUES (?,datetime('now'),?,?)",
-                    [$newVersion, "Updated via admin panel from {$before} (channel: {$channel})", $after]);
-                $db->execute("INSERT INTO settings (`key`,`value`,updated_at) VALUES ('panel_version',?,datetime('now')) ON CONFLICT(`key`) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
-                    [$newVersion]);
-                $steps[] = "Version: $newVersion recorded";
-            }
-
-            // Reload PHP-FPM
-            shell_exec("sudo systemctl reload php8.3-fpm 2>/dev/null || sudo systemctl reload php8.2-fpm 2>/dev/null || true");
-            $steps[] = "PHP-FPM reloaded";
-
-            // Verify panel is still up
-            sleep(2);
-            $port    = defined('PORT_ADMIN') ? PORT_ADMIN : 8882;
-            $panelOk = false;
-            foreach (['https','http'] as $scheme) {
-                $code = trim(shell_exec("curl -sk -o /dev/null -w '%{http_code}' {$scheme}://127.0.0.1:{$port}/api/system/version --max-time 5 2>/dev/null") ?: '');
-                if (in_array($code, ['200','401','302','301'])) { $panelOk = true; break; }
-            }
-            if (!$panelOk) {
-                shell_exec("sudo rsync -a --delete " . escapeshellarg("$backupDir/") . " " . escapeshellarg("$webRoot/") . " 2>&1");
-                novacpx_log('error', "NovaCPX update failed — panel down after deploy; restored from backup");
-                Response::error('Update deployed but panel went down — auto-restored from backup. Check logs.');
-            }
-
-            audit('system.novacpx-update', "novacpx:{$before}→{$after} (channel:{$channel})");
-            novacpx_log('info', "NovaCPX updated $before → $after via $channel channel");
+        // The privileged helper runs the deploy runner: pull, PHP syntax check with rollback, rsync, migrations, version record, FPM reload.
+        $r = Root::run('panel.update.apply', ['channel' => $channel]);
+        if ($r['rc'] !== 0) Response::error('Update failed: ' . trim($r['out']));
+        $res = json_decode($r['out'], true) ?: [];
+        if (!empty($res['updated'])) {
+            audit('system.novacpx-update', "novacpx:{$res['before']}→{$res['after']} (channel:{$channel})");
+            novacpx_log('info', "NovaCPX updated {$res['before']} → {$res['after']} via $channel channel");
         }
-
         Response::success([
-            'updated'     => $changed,
-            'from_commit' => $before,
-            'to_commit'   => $after,
+            'updated'     => !empty($res['updated']),
+            'from_commit' => $res['before'] ?? '',
+            'to_commit'   => $res['after'] ?? '',
             'channel'     => $channel,
-            'pull_output' => trim($pull ?? ''),
-            'backup_path' => $backupDir,
-            'steps'       => $steps,
+            'pull_output' => '',
+            'backup_path' => '',
+            'steps'       => array_values(array_filter(explode("\n", trim($res['log'] ?? '')))),
         ]);
     })(),
 
     // ── Server Stats ──────────────────────────────────────────────────────────
     'stats' => (function() use ($db) {
+        Auth::getInstance()->require('admin');
         // CPU/load
         $load   = sys_getloadavg();
         $cpuPct = round(($load[0] / max(1, (int)shell_exec('nproc'))) * 100, 1);
@@ -632,7 +532,7 @@ BASH;
                 $installed = trim(shell_exec("dpkg -l rspamd 2>/dev/null | grep -c '^ii'") ?: '0');
                 if ($installed === '0') {
                     $sse("  Installing Rspamd (this may take 1–2 minutes)…\n");
-                    $run("sudo apt-get install -y rspamd 2>&1");
+                    $run(Root::shellCommand('pkg.apt', ['op' => 'install', 'packages' => ['rspamd']]) . ' 2>&1');
                 }
                 $sse("  Enabling Rspamd…\n");
                 $run("sudo systemctl enable rspamd 2>&1 && sudo systemctl start rspamd 2>&1");
@@ -655,7 +555,7 @@ BASH;
             $installed = trim(shell_exec("dpkg -l $startSvc 2>/dev/null | grep -c '^ii'") ?: '0');
             if ($installed === '0') {
                 $sse("  Installing {$startSvc}…\n");
-                $run("sudo apt-get install -y $startSvc 2>&1");
+                $run(Root::shellCommand('pkg.apt', ['op' => 'install', 'packages' => [$startSvc]]) . ' 2>&1');
             }
             $sse("  Starting {$startSvc}…\n");
             $run("sudo systemctl enable $startSvc 2>&1 && sudo systemctl start $startSvc 2>&1");
@@ -671,7 +571,7 @@ BASH;
                 $installed = trim(shell_exec("dpkg -l $startSvc 2>/dev/null | grep -c '^ii'") ?: '0');
                 if ($installed === '0') {
                     $sse("  Installing {$startSvc}…\n");
-                    $run("sudo apt-get install -y $startSvc 2>&1");
+                    $run(Root::shellCommand('pkg.apt', ['op' => 'install', 'packages' => [$startSvc]]) . ' 2>&1');
                 }
                 $sse("  Starting {$startSvc}…\n");
                 $run("sudo systemctl enable $startSvc 2>&1 && sudo systemctl start $startSvc 2>&1");
@@ -891,29 +791,13 @@ BASH;
         // Panel DB is SQLite — no MySQL engine hosts it, so any MySQL/MariaDB/PG can be removed freely
 
         $out = '';
-        if ($action === 'install') {
-            $pkg = match($engine) {
-                'mysql'      => 'mysql-server',
-                'mariadb'    => 'mariadb-server',
-                'postgresql' => 'postgresql postgresql-contrib',
-            };
-            $out = shell_exec("sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y $pkg 2>&1");
-            shell_exec("sudo systemctl enable $engine 2>/dev/null && sudo systemctl start $engine 2>/dev/null");
-        } elseif ($action === 'remove') {
-            $pkg = match($engine) {
-                'mysql'      => 'mysql-server mysql-client',
-                'mariadb'    => 'mariadb-server mariadb-client',
-                'postgresql' => 'postgresql postgresql-contrib',
-            };
-            shell_exec("sudo systemctl stop $engine 2>/dev/null || true");
-            $out = shell_exec("sudo env DEBIAN_FRONTEND=noninteractive apt-get remove -y $pkg 2>&1");
-        } elseif ($action === 'set-active') {
+        if ($action === 'set-active') {
             $db->execute("INSERT INTO settings (`key`,`value`) VALUES ('active_db_engine',?) ON CONFLICT(`key`) DO UPDATE SET value=excluded.value", [$engine]);
             audit('settings.active_db_engine', $engine);
             Response::success(null, "Active database engine set to $engine");
-        } else {
-            shell_exec("sudo systemctl $action $engine 2>/dev/null");
         }
+        // install / remove / start / stop / restart run in the privileged helper (fixed package lists, fixed units)
+        $out = Root::run('dbengine', ['engine' => $engine, 'action' => $action])['out'];
         audit("db-engine.$action", $engine);
         Response::success(['output' => substr($out ?: '', -1000)], ucfirst($action) . " $engine done");
     })(),
@@ -973,99 +857,10 @@ BASH;
             return proc_close($proc);
         };
 
-        $env = 'sudo env DEBIAN_FRONTEND=noninteractive';
-
-        if ($tool === 'adminer') {
-            $adminerPath = NOVACPX_ROOT . '/adminer.php';
-            if ($action === 'remove') {
-                $sse("▶ Removing Adminer…\n");
-                $run('sudo rm -f ' . escapeshellarg($adminerPath));
-                $sse("  ✓ Removed!\n");
-            } else {
-                $sse("▶ Downloading Adminer…\n");
-                $out = shell_exec('curl -sL https://www.adminer.org/latest.php -o ' . escapeshellarg($adminerPath) . ' 2>&1');
-                if (is_file($adminerPath) && filesize($adminerPath) > 100000) {
-                    $sse("  ✓ Adminer installed at /adminer.php (" . round(filesize($adminerPath)/1024) . " KB)\n");
-                } else {
-                    $sse("  ✗ Download failed: $out\n");
-                }
-            }
-        } else if ($tool === 'phpmyadmin') {
-            if ($action === 'remove') {
-                $sse("▶ Removing phpMyAdmin…\n");
-                $run("$env apt-get remove -y phpmyadmin 2>&1");
-            } else {
-                if ($action === 'reinstall') {
-                    $sse("▶ Removing existing phpMyAdmin installation…\n");
-                    $run("$env apt-get remove -y phpmyadmin 2>&1");
-                }
-                $sse("▶ Pre-configuring debconf answers…\n");
-                shell_exec("echo 'phpmyadmin phpmyadmin/reconfigure-webserver multiselect apache2' | sudo debconf-set-selections 2>/dev/null");
-                shell_exec("echo 'phpmyadmin phpmyadmin/dbconfig-install boolean true' | sudo debconf-set-selections 2>/dev/null");
-                $sse("  ✓ Done\n");
-                $sse("▶ Installing phpMyAdmin (this takes 20–60 seconds)…\n");
-                $rc = $run("$env apt-get install -y phpmyadmin php8.3-mbstring php8.3-xml php8.3-zip 2>&1");
-                if ($rc !== 0) { echo 'data:'.json_encode(['error'=>'apt-get failed (see output above)'])."\n\n"; flush(); exit; }
-                $sse("▶ Configuring web server alias…\n");
-                if (!is_link('/etc/apache2/conf-enabled/phpmyadmin.conf') && is_file('/etc/phpmyadmin/apache.conf')) {
-                    shell_exec("sudo ln -sf /etc/phpmyadmin/apache.conf /etc/apache2/conf-enabled/phpmyadmin.conf 2>/dev/null");
-                    shell_exec("sudo systemctl reload apache2 2>/dev/null || true");
-                    $sse("  ✓ Apache alias enabled\n");
-                }
-                if (is_dir('/etc/nginx') && !is_file('/etc/nginx/conf.d/phpmyadmin.conf')) {
-                    $nginxConf = "location /phpmyadmin {\n    root /usr/share/;\n    index index.php;\n    location ~ ^/phpmyadmin/(.+\\.php)\$ {\n        root /usr/share/;\n        fastcgi_pass unix:/run/php/php8.3-fpm.sock;\n        fastcgi_index index.php;\n        include fastcgi.conf;\n    }\n}\n";
-                    shell_exec("echo " . escapeshellarg($nginxConf) . " | sudo tee /etc/nginx/conf.d/phpmyadmin.conf > /dev/null");
-                    shell_exec("sudo systemctl reload nginx 2>/dev/null || true");
-                    $sse("  ✓ Nginx alias created\n");
-                }
-            }
-        } else {
-            // pgAdmin4
-            if ($action === 'remove') {
-                $sse("▶ Removing pgAdmin 4…\n");
-                $run("$env apt-get remove -y pgadmin4 pgadmin4-web 2>&1");
-            } else {
-                if ($action === 'reinstall') {
-                    $sse("▶ Removing existing pgAdmin 4 installation…\n");
-                    $run("$env apt-get remove -y pgadmin4 pgadmin4-web 2>&1");
-                }
-                if (!is_file('/etc/apt/sources.list.d/pgadmin4.list')) {
-                    $sse("▶ Adding pgAdmin apt repository…\n");
-                    $distro = trim(shell_exec("lsb_release -cs 2>/dev/null") ?: 'jammy');
-                    $run("sudo curl -fsS https://www.pgadmin.org/static/packages_pgadmin_org.pub | sudo gpg --dearmor -o /usr/share/keyrings/pgadmin4.gpg 2>&1");
-                    $repoLine = "deb [signed-by=/usr/share/keyrings/pgadmin4.gpg] https://ftp.postgresql.org/pub/pgadmin/pgadmin4/apt/{$distro} pgadmin4 main\n";
-                    shell_exec("echo " . escapeshellarg($repoLine) . " | sudo tee /etc/apt/sources.list.d/pgadmin4.list > /dev/null");
-                    $sse("▶ Updating package lists…\n");
-                    $run("sudo apt-get update 2>&1");
-                }
-                $sse("▶ Installing pgAdmin 4 web (this takes 1–3 minutes)…\n");
-                $rc = $run("$env apt-get install -y pgadmin4-web 2>&1");
-                if ($rc !== 0) { echo 'data:'.json_encode(['error'=>'apt-get failed (see output above)'])."\n\n"; flush(); exit; }
-                // Enable Apache config
-                $sse("▶ Enabling Apache configuration…\n");
-                shell_exec("sudo a2enconf pgadmin4 2>/dev/null");
-                shell_exec("sudo systemctl reload apache2 2>/dev/null");
-                $sse("  ✓ Apache config enabled\n");
-                // Initialise pgAdmin DB with provided credentials
-                $pgaEmail = $body['pga_email'] ?? '';
-                $pgaPass  = $body['pga_pass']  ?? '';
-                if ($pgaEmail && $pgaPass) {
-                    $sse("▶ Initialising pgAdmin database and admin user…\n");
-                    // Wipe any broken DB from prior attempts
-                    shell_exec("sudo rm -f /var/lib/pgadmin/pgadmin4.db /var/lib/pgadmin/pgadmin4.db.* 2>/dev/null");
-                    $setupCmd = "sudo env"
-                        . " PGADMIN_SETUP_EMAIL=" . escapeshellarg($pgaEmail)
-                        . " PGADMIN_SETUP_PASSWORD=" . escapeshellarg($pgaPass)
-                        . " /usr/pgadmin4/venv/bin/python3 /usr/pgadmin4/web/setup.py setup-db 2>&1";
-                    $run($setupCmd);
-                    // Fix ownership so Apache/www-data can read the DB and log
-                    shell_exec("sudo mkdir -p /var/log/pgadmin && sudo chown -R www-data:www-data /var/lib/pgadmin /var/log/pgadmin 2>/dev/null");
-                    shell_exec("sudo systemctl reload apache2 2>/dev/null");
-                } else {
-                    $sse("  ⚠ No credentials provided — run Reinstall to set up admin user\n");
-                }
-            }
-        }
+        // The whole install/reinstall/remove runs in the privileged helper (fixed repository, fixed packages, fixed config text);
+        // its output streams straight into the page.
+        $rc = Root::stream('db.tool', ['tool' => $tool, 'action' => $action, 'email' => $body['pga_email'] ?? '', 'password' => $body['pga_pass'] ?? ''], $sse);
+        if ($rc !== 0) { echo 'data:' . json_encode(['error' => 'The installer reported a problem (see the output above)']) . "\n\n"; flush(); exit; }
 
         audit("db-tools.$action", $tool);
         $verb = ['install'=>'Installed','reinstall'=>'Reinstalled','remove'=>'Removed'][$action];

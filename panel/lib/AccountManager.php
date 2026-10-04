@@ -3,6 +3,8 @@
  * AccountManager — creates/suspends/terminates Linux hosting accounts
  * Each account = system user + home dir + vhost + DNS zone + mail domain
  */
+require_once __DIR__ . '/Root.php';
+
 class AccountManager {
 
     public static function create(array $data): array {
@@ -26,12 +28,9 @@ class AccountManager {
         $password = $data['password'] ?? bin2hex(random_bytes(8));
 
         // Create Linux user and home directory first
-        self::shell("useradd -m -d {$homeDir} -s /sbin/nologin -G www-data " . escapeshellarg($username));
-        self::shell("echo " . escapeshellarg("{$username}:{$password}") . " | sudo chpasswd");
-        self::shell("sudo mkdir -p {$docRoot} {$homeDir}/logs {$homeDir}/tmp");
-        self::shell("sudo chown -R {$username}:www-data {$homeDir}");
-        self::shell("sudo chmod 750 {$homeDir}");
-        self::shell("sudo chmod 775 {$docRoot}");
+        Root::ok('user.add', ['username' => $username]);
+        Root::ok('user.passwd', ['username' => $username, 'password' => $password]);
+        Root::ok('home.init', ['username' => $username]);
 
         // Default index page — use custom template from settings if set, else built-in
         $customTpl = null;
@@ -45,7 +44,7 @@ class AccountManager {
             ? str_replace(['{domain}', '{username}'], [$domain, $username], $customTpl)
             : "<!DOCTYPE html>\n<html lang=\"en\">\n<head><meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n<title>Welcome to {$domain}</title>\n<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f1117;color:#e2e4f0;display:flex;align-items:center;justify-content:center;min-height:100vh;text-align:center}.wrap{padding:3rem 2rem}.domain{font-size:2rem;font-weight:700;background:linear-gradient(135deg,#6366f1,#0ea5e9);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;margin-bottom:1rem}.sub{color:#8b90a8;font-size:1rem;margin-bottom:2rem}.badge{display:inline-block;padding:.4rem 1rem;border:1px solid #2e3350;border-radius:6px;font-size:.8rem;color:#8b90a8}</style>\n</head>\n<body><div class=\"wrap\">\n<div class=\"domain\">{$domain}</div>\n<p class=\"sub\">Your website is ready. Upload your files to get started.</p>\n<span class=\"badge\">Hosted by NovaCPX</span>\n</div></body></html>";
 
-        self::shell("sudo tee " . escapeshellarg("{$docRoot}/index.html") . " > /dev/null << 'HTMLEOF'\n{$html}\nHTMLEOF");
+        Root::run('home.index', ['username' => $username, 'html' => $html]);
 
         // NOTE: caller (accounts.php) already owns the outer transaction -- do not
         // begin/commit/rollback here, PDO doesn't support nested transactions.
@@ -74,7 +73,7 @@ class AccountManager {
 
         } catch (Throwable $e) {
             // Clean up Linux user and PHP-FPM pool so orphaned configs can't crash php-fpm
-            self::shell("userdel -r " . escapeshellarg($username) . " 2>/dev/null || true");
+            Root::run('user.del', ['username' => $username]);
             PHPManager::removePool($username);
             throw $e;
         }
@@ -88,7 +87,7 @@ class AccountManager {
         $acct = $db->fetchOne("SELECT * FROM accounts WHERE id = ?", [$acctId]);
         if (!$acct) throw new RuntimeException("Account not found");
 
-        self::shell("usermod -L " . escapeshellarg($acct['username']));
+        Root::ok('user.lock', ['username' => $acct['username']]);
         VhostManager::suspend($acct['username'], $acct['domain']);
         $db->execute("UPDATE accounts SET status = 'suspended', suspended_at = NOW() WHERE id = ?", [$acctId]);
         novacpx_log('info', "Account suspended: {$acct['username']} — $reason");
@@ -99,7 +98,7 @@ class AccountManager {
         $acct = $db->fetchOne("SELECT * FROM accounts WHERE id = ?", [$acctId]);
         if (!$acct) throw new RuntimeException("Account not found");
 
-        self::shell("usermod -U " . escapeshellarg($acct['username']));
+        Root::ok('user.lock', ['username' => $acct['username'], 'unlock' => true]);
         VhostManager::unsuspend($acct['username'], $acct['domain']);
         $db->execute("UPDATE accounts SET status = 'active', suspended_at = NULL WHERE id = ?", [$acctId]);
     }
@@ -124,7 +123,7 @@ class AccountManager {
         PHPManager::removePool($acct['username']);
 
         // Remove Linux user and home dir
-        self::shell("userdel -r " . escapeshellarg($acct['username']) . " 2>/dev/null || true");
+        Root::run('user.del', ['username' => $acct['username']]);
 
         // Remove from DB (cascade handles child tables)
         $db->execute("DELETE FROM users WHERE id = ?", [$acct['user_id']]);
@@ -135,20 +134,17 @@ class AccountManager {
     public static function provisionEmailDNS(int $acctId, string $domain): void {
         // Generate DKIM keypair
         $keyDir = "/etc/opendkim/keys/{$domain}";
-        self::shell("sudo mkdir -p " . escapeshellarg($keyDir));
-        self::shell("opendkim-genkey -b 2048 -s mail -d " . escapeshellarg($domain) . " -D " . escapeshellarg($keyDir));
-        self::shell("sudo chown -R opendkim:opendkim " . escapeshellarg($keyDir));
+        $gen    = Root::json('dkim.genkey', ['domain' => $domain, 'selector' => 'mail']);
 
-        // Parse public key from .txt file
-        $keyTxt = @file_get_contents("{$keyDir}/mail.txt") ?: '';
-        preg_match('/p=([A-Za-z0-9+\/=]+)/', $keyTxt, $m);
+        // Parse public key from the generated .txt record
+        $keyTxt = (string)($gen['txt'] ?? '');
+        preg_match_all('/"([^"]*)"/', $keyTxt, $chunks);
+        preg_match('/p=([A-Za-z0-9+\/=]+)/', implode('', $chunks[1]), $m);   // the record is split over several quoted strings
         $pubKey = $m[1] ?? '';
 
         if ($pubKey) {
             // Register domain/key in opendkim tables
-            self::shell("grep -q " . escapeshellarg($domain) . " /etc/opendkim/signing.table 2>/dev/null || echo " . escapeshellarg("*@{$domain} {$domain}") . " >> /etc/opendkim/signing.table");
-            self::shell("grep -q " . escapeshellarg($domain) . " /etc/opendkim/key.table 2>/dev/null || echo " . escapeshellarg("{$domain} {$domain}:mail:{$keyDir}/mail.private") . " >> /etc/opendkim/key.table");
-            self::shell("systemctl reload opendkim 2>/dev/null || true");
+            Root::run('dkim.register', ['domain' => $domain, 'selector' => 'mail']);
 
             // Store in DB
             $db = DB::getInstance();
@@ -177,19 +173,16 @@ class AccountManager {
         $db       = DB::getInstance();
         $selector = 'mail' . date('Ym');
         $keyDir   = "/etc/opendkim/keys/{$domain}";
-        self::shell("sudo mkdir -p " . escapeshellarg($keyDir));
-        self::shell("opendkim-genkey -b 2048 -s {$selector} -d " . escapeshellarg($domain) . " -D " . escapeshellarg($keyDir));
-        self::shell("sudo chown -R opendkim:opendkim " . escapeshellarg($keyDir));
+        $gen      = Root::json('dkim.genkey', ['domain' => $domain, 'selector' => $selector]);
 
-        $keyTxt = @file_get_contents("{$keyDir}/{$selector}.txt") ?: '';
-        preg_match('/p=([A-Za-z0-9+\/=]+)/', $keyTxt, $m);
+        $keyTxt = (string)($gen['txt'] ?? '');
+        preg_match_all('/"([^"]*)"/', $keyTxt, $chunks);
+        preg_match('/p=([A-Za-z0-9+\/=]+)/', implode('', $chunks[1]), $m);   // the record is split over several quoted strings
         $pubKey = $m[1] ?? '';
         if (!$pubKey) throw new RuntimeException("DKIM key generation failed");
 
-        // Update key.table
-        $keyTableLine = "{$domain} {$domain}:{$selector}:{$keyDir}/{$selector}.private";
-        self::shell("sed -i " . escapeshellarg("/^{$domain} /d") . " /etc/opendkim/key.table 2>/dev/null; echo " . escapeshellarg($keyTableLine) . " >> /etc/opendkim/key.table");
-        self::shell("systemctl reload opendkim 2>/dev/null || true");
+        // Update the signing/key tables to the new selector
+        Root::run('dkim.register', ['domain' => $domain, 'selector' => $selector]);
 
         $db->execute(
             "INSERT INTO dkim_keys (account_id, domain, selector, public_key, private_key_path, created_at) VALUES (?,?,?,?,?,NOW()) ON DUPLICATE KEY UPDATE selector=VALUES(selector), public_key=VALUES(public_key), private_key_path=VALUES(private_key_path)",
@@ -209,12 +202,7 @@ class AccountManager {
     }
 
     private static function shell(string $cmd): string {
-        // Prefix privileged commands with sudo so www-data can run them
-        $privileged = ['useradd','userdel','usermod','chpasswd','a2ensite','a2dissite','apache2ctl','certbot','opendkim-genkey','rndc','named-checkzone','systemctl'];
-        $cmdBase    = explode(' ', ltrim($cmd))[0];
-        foreach ($privileged as $p) {
-            if (str_ends_with($cmdBase, $p) || $cmdBase === $p) { $cmd = 'sudo ' . $cmd; break; }
-        }
+        // Unprivileged helper only; everything that needs root goes through Root (see lib/Root.php, deploy/novacpx-root).
         $out = shell_exec($cmd . ' 2>&1');
         novacpx_log('debug', "shell: $cmd");
         return $out ?: '';

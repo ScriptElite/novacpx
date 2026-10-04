@@ -10,11 +10,19 @@ $db = DB::getInstance();
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
+require_once NOVACPX_LIB . '/Root.php';
+
 function fw_exec(string $cmd): string {
-    // Prefix ufw and fail2ban-client with sudo (www-data has NOPASSWD via sudoers.d/novacpx-firewall)
-    $cmd = preg_replace('/^(ufw|fail2ban-client|systemctl (restart|reload|start|stop) fail2ban)\b/', 'sudo $1', $cmd);
+    // ufw and systemctl (fixed units) run through sudoers.d/novacpx-root's fixed-argument rules;
+    // fail2ban-client goes through the privileged helper (f2b() below) because its `set` commands can run arbitrary actions.
+    $cmd = preg_replace('/^(ufw|systemctl (restart|reload|start|stop) fail2ban)\b/', 'sudo $1', $cmd);
     $out = shell_exec($cmd . ' 2>&1');
     return trim($out ?: '');
+}
+
+/** fail2ban-client through the helper: only status / reload / `set <jail> banip|unbanip <ip>` are accepted. */
+function f2b(array $args): string {
+    return trim(Root::run('fail2ban', ['args' => $args])['out']);
 }
 
 define('JAIL_LOCAL', '/etc/fail2ban/jail.local');
@@ -50,26 +58,10 @@ function f2b_get_ignoreip(): array {
     return local_ips();
 }
 
-/** Write ignoreip list to jail.local and reload fail2ban */
+/** Write ignoreip list to jail.local (through the helper, which validates every entry) and reload fail2ban */
 function f2b_set_ignoreip(array $ips): void {
-    $ips  = array_values(array_unique(array_filter($ips)));
-    $line = 'ignoreip = ' . implode(' ', $ips);
-
-    if (!file_exists(JAIL_LOCAL)) {
-        // Create jail.local with [DEFAULT] section
-        file_put_contents(JAIL_LOCAL, "[DEFAULT]\n{$line}\n\n[sshd]\nenabled = true\n");
-    } else {
-        $content = file_get_contents(JAIL_LOCAL);
-        if (preg_match('/^\s*ignoreip\s*=/m', $content)) {
-            $content = preg_replace('/^\s*ignoreip\s*=.+$/m', $line, $content);
-        } elseif (preg_match('/^\[DEFAULT\]/m', $content)) {
-            $content = preg_replace('/(\[DEFAULT\][^\[]*)/s', "$1{$line}\n", $content, 1);
-        } else {
-            $content = "[DEFAULT]\n{$line}\n\n" . $content;
-        }
-        file_put_contents(JAIL_LOCAL, $content);
-    }
-    shell_exec('sudo fail2ban-client reload 2>/dev/null');
+    $ips = array_values(array_unique(array_filter($ips)));
+    Root::ok('fail2ban.defaults', ['ignoreip' => $ips]);
 }
 
 /** Parse `ufw status verbose` into structured data */
@@ -118,7 +110,7 @@ function ufw_status(): array {
 
 /** Parse fail2ban-client status output into jail list */
 function f2b_jails(): array {
-    $raw   = fw_exec('fail2ban-client status');
+    $raw   = f2b(['status']);
     preg_match('/Jail list:\s*(.+)/', $raw, $m);
     if (!$m[1]) return [];
     return array_values(array_filter(array_map('trim', explode(',', $m[1]))));
@@ -126,7 +118,7 @@ function f2b_jails(): array {
 
 /** Get details for a single jail */
 function f2b_jail_detail(string $jail): array {
-    $raw = fw_exec('fail2ban-client status ' . escapeshellarg($jail));
+    $raw = f2b(['status', $jail]);
     preg_match('/Currently banned:\s*(\d+)/', $raw, $banned);
     preg_match('/Total banned:\s*(\d+)/', $raw, $total);
     preg_match('/Currently failed:\s*(\d+)/', $raw, $failed);
@@ -347,7 +339,7 @@ switch ($action) {
         $results = [];
         $targets = $jail ? [$jail] : f2b_jails();
         foreach ($targets as $j) {
-            $out = fw_exec("fail2ban-client set " . escapeshellarg($j) . " unbanip " . escapeshellarg($ip));
+            $out = f2b(['set', $j, 'unbanip', $ip]);
             $results[$j] = $out;
         }
         audit('firewall.f2b-unban', "$ip from " . ($jail ?: 'all'));
@@ -360,14 +352,14 @@ switch ($action) {
         $jail = preg_replace('/[^a-z0-9_\-]/', '', trim($body['jail'] ?? 'sshd'));
         if (!$ip) Response::error('ip required');
         if (!filter_var($ip, FILTER_VALIDATE_IP)) Response::error('Invalid IP');
-        $out = fw_exec("fail2ban-client set " . escapeshellarg($jail) . " banip " . escapeshellarg($ip));
+        $out = f2b(['set', $jail, 'banip', $ip]);
         audit('firewall.f2b-ban', "$ip in $jail");
         Response::success(['output' => $out], "Banned $ip in $jail");
         break;
 
     // ── Fail2Ban: reload config ───────────────────────────────────────────
     case 'f2b-reload':
-        $out = fw_exec('fail2ban-client reload');
+        $out = f2b(['reload']);
         audit('firewall.f2b-reload', 'fail2ban');
         Response::success(['output' => $out], 'Fail2Ban reloaded');
         break;
@@ -446,20 +438,7 @@ switch ($action) {
         $findtime = (int)($body['findtime'] ?? 600);
         $maxretry = (int)($body['maxretry'] ?? 5);
         if ($bantime < 60 || $findtime < 60 || $maxretry < 1) Response::error('Invalid values');
-        $content = file_exists(JAIL_LOCAL) ? file_get_contents(JAIL_LOCAL) : '';
-        $set = function(string $key, string $val) use (&$content): void {
-            if (preg_match('/^\s*' . preg_quote($key) . '\s*=/m', $content)) {
-                $content = preg_replace('/^(\s*' . preg_quote($key) . '\s*=\s*).+$/m', '${1}' . $val, $content);
-            } else {
-                // Insert into [DEFAULT] section
-                $content = preg_replace('/(\[DEFAULT\][^\[]*)/s', '$1' . "$key   = $val\n", $content, 1);
-            }
-        };
-        $set('bantime',  (string)$bantime);
-        $set('findtime', (string)$findtime);
-        $set('maxretry', (string)$maxretry);
-        file_put_contents(JAIL_LOCAL, $content);
-        fw_exec('fail2ban-client reload');
+        Root::ok('fail2ban.defaults', ['bantime' => $bantime, 'findtime' => $findtime, 'maxretry' => $maxretry]);
         audit('firewall.f2b-config', "bantime=$bantime findtime=$findtime maxretry=$maxretry");
         Response::success(null, 'Fail2Ban configuration saved');
         break;

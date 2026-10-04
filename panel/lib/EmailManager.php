@@ -3,6 +3,8 @@
  * EmailManager — Postfix virtual mailbox + Dovecot user management
  * Uses MySQL backend for both Postfix and Dovecot
  */
+require_once __DIR__ . '/Root.php';
+
 class EmailManager {
 
     public static function createAccount(int $accountId, string $email, string $password, int $quotaMb = 500): int {
@@ -81,38 +83,20 @@ class EmailManager {
 
         // Virtual mailbox map
         $accounts = $db->fetchAll("SELECT ea.email, a.username FROM email_accounts ea JOIN accounts a ON a.id = ea.account_id WHERE ea.status = 'active'");
-        $mailboxes = '';
-        foreach ($accounts as $a) {
-            $domain = substr(strrchr($a['email'], '@'), 1);
-            $user   = strstr($a['email'], '@', true);
-            $mailboxes .= "{$a['email']}   {$a['username']}/{$domain}/{$user}/\n";
-        }
-        self::writePostfixFile('/etc/postfix/novacpx_mailboxes', $mailboxes);
-        shell_exec('sudo postmap /etc/postfix/novacpx_mailboxes 2>/dev/null');
+        $mailboxes = [];
+        foreach ($accounts as $a) $mailboxes[] = ['email' => $a['email'], 'username' => $a['username']];
 
         // Virtual alias map (forwarders)
-        $forwarders = $db->fetchAll("SELECT source, destination FROM email_forwarders");
-        $aliases = '';
-        foreach ($forwarders as $f) {
-            $aliases .= "{$f['source']}   {$f['destination']}\n";
-        }
-        self::writePostfixFile('/etc/postfix/novacpx_aliases', $aliases);
-        shell_exec('sudo postmap /etc/postfix/novacpx_aliases 2>/dev/null');
+        $aliases = [];
+        foreach ($db->fetchAll("SELECT source, destination FROM email_forwarders") as $f) $aliases[] = ['source' => $f['source'], 'destination' => $f['destination']];
 
         // Virtual domains map — SQLite-compatible (no SUBSTRING_INDEX)
-        $domains = $db->fetchAll("SELECT DISTINCT SUBSTR(email, INSTR(email,'@') + 1) AS domain FROM email_accounts WHERE status='active'");
-        $vdomains = '';
-        foreach ($domains as $d) { $vdomains .= "{$d['domain']}   novacpx\n"; }
-        self::writePostfixFile('/etc/postfix/novacpx_domains', $vdomains);
-        shell_exec('sudo postmap /etc/postfix/novacpx_domains 2>/dev/null');
-        shell_exec('sudo systemctl reload postfix 2>/dev/null || true');
-    }
+        $domains = [];
+        foreach ($db->fetchAll("SELECT DISTINCT SUBSTR(email, INSTR(email,'@') + 1) AS domain FROM email_accounts WHERE status='active'") as $d) $domains[] = $d['domain'];
 
-    private static function writePostfixFile(string $path, string $content): void {
-        $tmp = tempnam('/tmp', 'ncpx_pf_');
-        file_put_contents($tmp, $content);
-        shell_exec('sudo tee ' . escapeshellarg($path) . ' > /dev/null < ' . escapeshellarg($tmp));
-        @unlink($tmp);
+        // The privileged helper validates every entry, writes the three maps, runs postmap and reloads postfix.
+        $r = Root::run('mail.sync', ['mailboxes' => $mailboxes, 'aliases' => $aliases, 'domains' => $domains]);
+        if ($r['rc'] !== 0) novacpx_log('warn', 'Postfix map sync failed: ' . trim($r['out']));
     }
 
     private static function hashPassword(string $password): string {

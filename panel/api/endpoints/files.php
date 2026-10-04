@@ -18,6 +18,8 @@ $acct = $db->fetchOne("SELECT * FROM accounts WHERE user_id = ?", [$user['uid']]
 if (!$acct && $user['role'] !== 'admin') Response::error("No hosting account found", 404);
 
 $baseDir = $acct ? realpath($acct['home_dir']) : '/';
+// Fail closed: a missing/unreadable home dir must never widen access to '/'.
+if ($baseDir === false || $baseDir === '') Response::error("Account home directory is unavailable", 403);
 // Normalize so the prefix check below doesn't break when baseDir is '/' (rtrim would otherwise
 // leave a doubled leading slash — '/' . '/' — that no real path can ever start with).
 $baseDirPrefix = rtrim($baseDir, '/');
@@ -40,7 +42,10 @@ function safe_path_new(string $base, string $rel): string {
     if ($parent === false || !str_starts_with($parent . '/', $baseDirPrefix . '/')) {
         throw new RuntimeException("Path outside account directory");
     }
-    return $parent . '/' . basename($candidate);
+    $result = $parent . '/' . basename($candidate);
+    // A symlink here (dangling, or pointing outside) would be followed by the write.
+    if (is_link($result)) throw new RuntimeException("Refusing to write through a symbolic link");
+    return $result;
 }
 
 // Only meaningful for true root access (baseDir === '/'); hosting accounts are always
@@ -135,8 +140,9 @@ match ($action) {
         try {
             $path = safe_path($baseDir, $rel);
         } catch (RuntimeException) {
-            $path = safe_path_new($baseDir, $rel);
+            $path = safe_path_new($baseDir, $rel);   // refuses symlinks
         }
+        if (is_link($path)) Response::error("Refusing to write through a symbolic link");
         require_dangerous_confirm($baseDir, $path, $body);
         if (file_exists($path) && !is_writable($path)) Response::error("Permission denied writing this file");
         // PHP syntax check for .php files
@@ -229,6 +235,7 @@ match ($action) {
         if ($filename === '' || $filename === '.') Response::error("Invalid filename");
         $dest = $dir . '/' . $filename;
         if (!str_starts_with($dest, rtrim($baseDir, '/') . '/')) Response::error("Invalid destination");
+        if (is_link($dest)) Response::error("Refusing to overwrite a symbolic link");
         if (!move_uploaded_file($_FILES['file']['tmp_name'], $dest)) Response::error("Upload failed (permission denied)");
         audit('files.upload', ($body['path'] ?? '') . '/' . $filename);
         Response::success(['name' => $filename], 'File uploaded');
@@ -239,12 +246,12 @@ match ($action) {
         $dest  = safe_path_new($baseDir, $body['dest'] ?? 'archive.zip');
         require_dangerous_confirm($baseDir, $dest, $body);
         $files = implode(' ', array_map('escapeshellarg', $paths));
-        shell_exec("cd " . escapeshellarg($baseDir) . " && zip -r " . escapeshellarg($dest) . " $files 2>&1");
+        shell_exec("cd " . escapeshellarg($baseDir) . " && zip -r -y " . escapeshellarg($dest) . " $files 2>&1");
         audit('files.compress', $body['dest'] ?? '', ['paths' => $body['paths'] ?? []]);
         Response::success(null, 'Archive created');
     })(),
 
-    'extract' => (function() use ($baseDir, $body) {
+    'extract' => (function() use ($baseDir, $baseDirPrefix, $body) {
         $file = safe_path($baseDir, $body['path'] ?? '');
         $dest = safe_path($baseDir, $body['dest'] ?? dirname($body['path'] ?? '/'));
         require_dangerous_confirm($baseDir, $dest, $body);
@@ -254,6 +261,14 @@ match ($action) {
             'gz','tgz','tar' => shell_exec("tar xf " . escapeshellarg($file) . " -C " . escapeshellarg($dest) . " 2>&1"),
             default => Response::error("Unsupported archive type"),
         };
+        // Drop any symlink the archive created that points outside the account directory.
+        $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($dest, FilesystemIterator::SKIP_DOTS));
+        foreach ($it as $f) {
+            if ($f->isLink()) {
+                $t = realpath($f->getPathname());
+                if ($t === false || !str_starts_with($t . '/', $baseDirPrefix . '/')) @unlink($f->getPathname());
+            }
+        }
         audit('files.extract', $body['path'] ?? '');
         Response::success(null, 'Extracted');
     })(),

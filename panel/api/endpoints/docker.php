@@ -14,6 +14,12 @@ if (!$isAdmin) {
     $_userAccountId = $acctRow ? (int)$acctRow['id'] : 0;
 }
 
+// A non-admin without a hosting account has no Docker rights at all. (Account id 0 used to match orphaned
+// containers/stacks, and resellers without an account were handed every container on the server.)
+if (!$isAdmin && !$_userAccountId && !in_array($action, ['catalog', 'quota-get'], true)) {
+    Response::error('A hosting account is required to use Docker', 403);
+}
+
 match ($action) {
 
     // ── Engine ──────────────────────────────────────────────────────────────
@@ -41,7 +47,7 @@ match ($action) {
         $stacks = $db->fetchAll("SELECT * FROM docker_compose_stacks WHERE account_id = ?", [$accountId]);
         foreach ($stacks as $stack) {
             if (is_dir($stack['stack_dir']) && file_exists("{$stack['stack_dir']}/docker-compose.yml")) {
-                shell_exec("sudo docker compose -f " . escapeshellarg("{$stack['stack_dir']}/docker-compose.yml") . " down -v 2>/dev/null");
+                Root::run('docker.compose', ['dir' => $stack['stack_dir'], 'action' => 'down-v', 'quota' => ['max_containers' => 50, 'max_memory_mb' => 65536, 'max_cpus' => 32]]);
             }
             $db->execute("DELETE FROM docker_compose_stacks WHERE id = ?", [$stack['id']]);
         }
@@ -50,7 +56,7 @@ match ($action) {
         $containers = $db->fetchAll("SELECT container_id FROM docker_containers WHERE account_id = ?", [$accountId]);
         foreach ($containers as $c) {
             if ($c['container_id']) {
-                shell_exec("sudo docker rm -f " . escapeshellarg($c['container_id']) . " 2>/dev/null");
+                Root::run('docker.rm', ['id' => $c['container_id'], 'force' => true]);
             }
         }
         $db->execute("DELETE FROM docker_containers WHERE account_id = ?", [$accountId]);
@@ -70,7 +76,6 @@ match ($action) {
     'containers' => (function() use ($dm, $currentUser, $isAdmin, $role, $_userAccountId) {
         $accountId = $isAdmin ? (isset($_GET['account_id']) ? (int)$_GET['account_id'] : null)
                               : ($_userAccountId ?? null);
-        if ($role === 'reseller') $accountId = null; // resellers see their customers' containers below
         $list = $dm->listContainers($accountId);
         Response::success(['containers' => $list]);
     })(),
@@ -188,7 +193,7 @@ match ($action) {
         $name      = $body['name']         ?? '';
         $yaml      = $body['compose_yaml'] ?? '';
         if (!$name || !$yaml) Response::error('name and compose_yaml required');
-        $result = $dm->createStack($accountId ? (int)$accountId : null, $name, $yaml);
+        $result = $dm->createStack($accountId ? (int)$accountId : null, $name, $yaml, $isAdmin);
         audit('docker.stack.create', "name:{$name}");
         Response::success($result, 'Stack created');
     })(),
@@ -260,7 +265,7 @@ match ($action) {
         $appKey = $body['app_key'] ?? '';
         $params = $body['params'] ?? [];
         if (!$appKey) Response::error('app_key required');
-        $result = $dm->launchFromCatalog($accountId, $appKey, $params);
+        $result = $dm->launchFromCatalog($accountId, $appKey, $params, $isAdmin);
         audit("docker.launch.{$appKey}", "account:{$accountId}");
         Response::success($result, ucfirst($appKey) . ' launched successfully');
     })(),

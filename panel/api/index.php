@@ -38,7 +38,8 @@ $_originPort = (int)(parse_url($origin, PHP_URL_PORT) ?? 0);
 $_panelPorts  = [8880, 8881, 8882, 8883]; // hardcoded — Core.php not loaded yet
 if ($origin && (
     in_array($_originHost, $_allowedHosts, true) ||
-    (in_array($_originPort, $_panelPorts, true) && filter_var($_originHost, FILTER_VALIDATE_IP))
+    (in_array($_originPort, $_panelPorts, true) && filter_var($_originHost, FILTER_VALIDATE_IP)
+        && $_originHost === ($_SERVER['SERVER_ADDR'] ?? ''))
 )) {
     header("Access-Control-Allow-Origin: $origin");
     header('Access-Control-Allow-Credentials: true');
@@ -64,13 +65,14 @@ if (!$endpoint) {
 }
 
 // Public endpoints (no auth required)
-$public = ['auth'];
+$public = ['auth', 'whmcs'];   // whmcs authenticates with its own X-WHMCS-Key (see whmcs.php)
 if (!in_array($endpoint, $public)) {
     $auth = Auth::getInstance();
     if (!$auth->check()) {
         Response::error('Unauthorized', 401);
     }
     $currentUser = $auth->user();
+    if (!$auth->endpointAllowed($endpoint)) Response::error('API token does not permit this endpoint', 403);
 }
 
 // Route to endpoint handler

@@ -1,0 +1,24 @@
+#!/bin/bash
+# NovaCPX auto-deploy: every minute (cron.d/novacpx-autodeploy) look at origin/main of the source checkout and, when it has
+# commits this server has not deployed, hand them to deploy-runner.sh (pull, syntax check, rsync to the web root, migrations,
+# version record, rollback on a PHP syntax error). No inbound webhook needed, so it works the same on the DO server and on a
+# LAN-only dev VM. Installed to /usr/local/bin/novacpx-poll-deploy by deploy/install-autodeploy.sh.
+REPO=/opt/novacpx-src
+QUEUE=/tmp/novacpx-deploy-queue.txt
+exec 9>/var/lock/novacpx-poll-deploy.lock
+flock -n 9 || exit 0
+cd "$REPO" 2>/dev/null || exit 0
+
+WEB_ROOT=$(awk -F= '/^[[:space:]]*webroot[[:space:]]*=/{gsub(/[[:space:]]/,"",$2); print $2; exit}' /etc/novacpx/config.ini 2>/dev/null)
+WEB_ROOT=${WEB_ROOT:-/srv/novacpx/public}
+
+timeout 40 git fetch -q origin main 2>/dev/null || exit 0
+LOCAL=$(git rev-parse HEAD) || exit 0
+REMOTE=$(git rev-parse origin/main) || exit 0
+[ "$LOCAL" = "$REMOTE" ] && exit 0
+# never act when this checkout has commits origin lacks (someone is working here)
+git merge-base --is-ancestor "$LOCAL" "$REMOTE" || { echo "$(date '+%F %T') local checkout has diverged from origin/main; not deploying"; exit 0; }
+
+echo "$(date '+%F %T') new commits on origin/main (${LOCAL:0:7} -> ${REMOTE:0:7}); deploying"
+echo "$REPO|$WEB_ROOT|${REMOTE:0:7}|main" >> "$QUEUE"
+bash "$REPO/deploy/deploy-runner.sh"
